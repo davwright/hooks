@@ -51,13 +51,35 @@ from `settings.json`.
 
 ## How it sees the command
 
-Claude Code passes a JSON blob on stdin, including the literal command and the
-shell's CWD. The hook reads `tool_input.command` plus `cwd` (via `jq`),
-classifies the command against `INTERCEPT_PATTERNS`, and exits non-zero with a
-message printed to stderr to refuse. Exit 0 lets the command through.
+Claude Code passes a JSON blob on stdin: `{ "cwd": ..., "tool_input":
+{ "command": "..." } }`. The hook reads those two fields with `jq`,
+classifies the command against `INTERCEPT_PATTERNS` (a bash array of
+labelled regexes — extend by appending), and exits non-zero with a stderr
+message to refuse. Exit 0 lets the command through.
 
-When `jq` isn't present the hook auto-installs it via winget on first run,
-fail-closed if install fails.
+To avoid false-positives from the bypass-flag check on commit-message
+text, the hook strips single- and double-quoted regions plus heredoc
+bodies (`<<EOF ... EOF`) before scanning for `--git-dir`, `GIT_DIR=`,
+etc. Quote-stripping is a sed pass, not real shell tokenization, so it
+doesn't execute any command substitutions in the input — even on a
+crafted `git commit -m "$(rm -rf ~)"` the inner command stays inert.
+
+The classification doesn't try to *run* the command's tokenizer; it
+matches command-shape regexes that are tight enough to identify the
+intent (`git commit`, `git remote add`, `git config remote.X.url
+<value>`) without false-positives on log/status/get reads.
+
+## Dependencies
+
+- `bash` — the hook runs as a `bash` script. On Windows that's the bash
+  shipped with Git for Windows (`C:\Program Files\Git\bin\bash.exe`),
+  which Claude Code uses for its Bash tool.
+- `jq` — used to parse the JSON blob from Claude Code. The hook
+  auto-installs `jq` via winget on first run if missing, fail-closed if
+  the install fails. Pre-install with `winget install jqlang.jq` to skip
+  the runtime install.
+- `git` — used to read the target repo's push remotes for the whitelist
+  check.
 
 ## Tests
 
@@ -65,12 +87,18 @@ fail-closed if install fails.
 bash block-git-write.test.sh
 ```
 
-67 unit tests covering the whitelisted-pass cases, every blocked family, all
-known bypass shapes, and false-positive guards (e.g. `echo "register_git_commit"`
-must pass; `git config --get remote.origin.url` must pass; `git config core.autocrlf input`
-must pass). The test harness creates two throwaway git repos with synthetic
-remotes — one whitelisted, one not — and feeds the hook the same JSON shape
-Claude Code produces.
+70 unit tests covering the whitelisted-pass cases, every blocked family,
+known bypass shapes (including env-var prefix, redirect flags, remote
+mutation, and config-remote writes), and false-positive guards
+(`echo "register_git_commit"` must pass; `git config --get
+remote.origin.url` must pass; `git config core.autocrlf input` must
+pass; `git commit -m "explains --git-dir bypass"` must pass — quoted
+text in commit messages doesn't trip flag detection).
+
+The test harness creates two throwaway git repos with synthetic
+remotes — one whitelisted (`evolx@`), one not (`oebb-azure-platform@`) —
+and feeds the hook the same JSON shape Claude Code produces, asserting
+on exit code.
 
 ## Why a hook instead of permission rules?
 

@@ -142,6 +142,16 @@ assert 0 allowed 'git config --get-regexp work-tree'            'git config get-
 assert 0 allowed 'export GIT_DIR=/x'                            'lone export of GIT_DIR'
 # echo of GIT_DIR=foo bytes is not a commit
 assert 0 allowed 'echo GIT_DIR=foo'                             'echo GIT_DIR=foo'
+# Bypass-flag tokens inside a commit MESSAGE must not block the commit.
+# These were a real false-positive: a meta-commit explaining what the hook
+# blocks was itself blocked.
+assert 0 allowed 'git commit -m "docs: explain --git-dir bypass"'         'commit msg containing --git-dir'
+assert 0 allowed 'git commit -m "block GIT_DIR= redirects"'               'commit msg containing GIT_DIR='
+assert 0 allowed "git commit -m 'block --work-tree redirects'"            'commit msg (single-quoted) containing --work-tree'
+# NOTE: heredoc-style commit messages (`git commit -m "$(cat <<EOF ... EOF)"`)
+# are NOT covered by the quote-stripping. If a heredoc body legitimately
+# contains "--git-dir" or "GIT_DIR=" it will still false-positive block.
+# That is a known limitation; rare in practice.
 
 # ── 8. Force flags should block on blocked repo ───────────────────────────
 echo "== force-push protection =="

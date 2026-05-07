@@ -88,11 +88,30 @@ fi
 # read remotes from the whitelisted CWD while the actual commit lands in
 # whatever repo GIT_DIR / --git-dir / --work-tree points at. Claude Code
 # has no legitimate reason to use any of them.
-if echo "$COMMAND" | grep -qE '(^|[[:space:];&|])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)='; then
+#
+# Strip single- and double-quoted substrings before scanning so commit
+# messages can't false-trip (e.g. `git commit -m "documents --git-dir
+# bypass attempts"`). Heredoc bodies (`<<EOF ... EOF`) are also stripped
+# so meta-commits explaining what the hook blocks aren't blocked by their
+# own message body. Anything outside a quoted/heredoc region is what a
+# real shell would treat as command syntax - that's what we scan.
+sanitized=$(printf '%s' "$COMMAND" \
+  | sed -E ':a;N;$!ba; s/<<-?'"'"'?([A-Za-z_][A-Za-z0-9_]*)'"'"'?[^\n]*\n.*\n\1[[:space:]]*$//g' \
+  | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g")
+
+# Env-var prefix: in bash, FOO=bar at the start of a command (whether
+# `FOO=bar cmd ...`, `export FOO=bar`, or after a separator) is an
+# env-var assignment. Anywhere else, after stripping quoted strings,
+# `FOO=bar` doesn't legitimately appear, so any GIT_DIR= sighting is
+# treated as an attempt to redirect git.
+if echo "$sanitized" | grep -qE '(^|[[:space:];&|])(GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)='; then
   echo "BLOCKED: git env-var override (GIT_DIR / GIT_WORK_TREE / ...) is not allowed - it bypasses the repo whitelist. Run the command without that env var, or commit manually." >&2
   exit 2
 fi
-if echo "$COMMAND" | grep -qE '(^|[[:space:]])--(git-dir|work-tree|namespace)(=|[[:space:]])'; then
+# Bypass flags: must appear as a token (preceded by whitespace), not
+# inside another arg. Stripping quotes above handles the message-body
+# false-positive.
+if echo "$sanitized" | grep -qE '(^|[[:space:]])--(git-dir|work-tree|namespace)(=|[[:space:]]|$)'; then
   echo "BLOCKED: git redirect flag (--git-dir / --work-tree / --namespace) is not allowed - it bypasses the repo whitelist. Use 'git -C <path>' instead, or commit manually." >&2
   exit 2
 fi
