@@ -5,7 +5,7 @@
 # Whitelist patterns (matched case-insensitively against push URLs)
 WHITELIST=(
   'github\.com'
-  '//evolx@'
+  'dev\.azure\.com/evolx/'
 )
 
 # Blocked:
