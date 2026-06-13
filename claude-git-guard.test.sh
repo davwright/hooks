@@ -5,11 +5,28 @@
 # Run: bash claude-git-guard.test.sh   (exit 0 = all pass)
 
 set -u
-HOOK="$(dirname "$0")/claude-git-guard.sh"
-[ -f "$HOOK" ] || { echo "FATAL: claude-git-guard.sh not found at $HOOK" >&2; exit 2; }
+# Which implementation to test. Default: the bash hook, run via `bash`.
+# Override to test the NativeAOT C# port:
+#   GUARD_CMD="<path>/claude-git-guard.exe" bash claude-git-guard.test.sh
+# GUARD_CMD is invoked directly (the exe needs no interpreter); the default
+# bash hook is prefixed with `bash` so it runs the same on Windows.
+GUARD_CMD="${GUARD_CMD:-bash $(dirname "$0")/claude-git-guard.sh}"
+# Sanity-check the runner resolves to something that exists.
+_RUNNER=${GUARD_CMD%% *}
+case "$_RUNNER" in
+  bash) [ -f "$(dirname "$0")/claude-git-guard.sh" ] || { echo "FATAL: claude-git-guard.sh not found" >&2; exit 2; } ;;
+  *)    [ -x "$_RUNNER" ] || [ -f "$_RUNNER" ] || { echo "FATAL: GUARD_CMD runner not found: $_RUNNER" >&2; exit 2; } ;;
+esac
+echo "# runner: $GUARD_CMD"
 
-TMP=$(mktemp -d); trap "rm -rf '$TMP'" EXIT
-# Deploy a fake git template so self-heal has stubs to install from.
+# Root the temp dir on a real drive (under the real $HOME, which Git Bash
+# reports as /c/...), NOT /tmp: the NativeAOT exe is a native Win32 process and
+# only understands drive-letter paths. /tmp is MSYS-internal and won't resolve
+# for the exe. Git Bash maps /c/ -> C:\ for both runners, so bash is unaffected.
+_REALHOME="$HOME"
+TMP=$(mktemp -d -p "$_REALHOME"); trap "rm -rf '$TMP'" EXIT
+# Deploy a fake git template so self-heal has stubs to install from. This also
+# becomes the HOME the hook sees, so self-heal reads its stubs from here.
 export HOME="$TMP/home"; mkdir -p "$HOME/.git-template/hooks"
 cp "$(dirname "$0")/templates/hooks/pre-commit" "$HOME/.git-template/hooks/pre-commit"
 cp "$(dirname "$0")/templates/hooks/pre-push"   "$HOME/.git-template/hooks/pre-push"
@@ -23,7 +40,7 @@ PASS=0; FAIL=0
 run() {  # $1=cwd $2=command -> echo exit code
   printf '{"cwd":%s,"tool_input":{"command":%s}}' \
     "$(printf %s "$1" | jq -Rs .)" "$(printf %s "$2" | jq -Rs .)" \
-    | bash "$HOOK" >/dev/null 2>"$TMP/err"; echo $?
+    | $GUARD_CMD >/dev/null 2>"$TMP/err"; echo $?
 }
 check() {
   local expected="$1" actual="$2" label="$3"
