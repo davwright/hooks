@@ -8,12 +8,22 @@
       2. The git template     -> $HOME\.git-template\hooks\{pre-commit,pre-push}  (thin stubs)
                                  + sets git config --global init.templateDir
          so every future `git init` / `git clone` is armed automatically.
-      3. The thin Claude hook -> ~\.claude\hooks\claude-git-guard.sh
+      3. The thin Claude hook -> ~\.claude\hooks\claude-git-guard.{exe|sh}
                                  + registers it in ~\.claude\settings.json under
-                                 PreToolUse:Bash, REPLACING the old block-git-write.sh
-                                 entry if present (no protection gap, no duplicate).
+                                 PreToolUse:Bash, REPLACING any older entry
+                                 (block-git-write.sh / the other impl) — no
+                                 protection gap, no duplicate.
+
+    The Claude hook fires on EVERY Bash tool call, so by default this installs
+    the fast NativeAOT C# build (csharp\). If it isn't built and can't be built
+    (no .NET SDK / MSVC), it falls back to the bash hook automatically.
 
     Idempotent: re-running overwrites scripts in place and de-dupes the settings entry.
+
+.PARAMETER HookImpl
+    Which Claude-hook implementation to deploy: 'auto' (default — native if
+    available/buildable, else bash), 'native' (force the C# exe; build it if
+    missing), or 'bash' (force the shell script).
 
 .PARAMETER ClaudeHome
     Override the Claude Code config dir. Defaults to $env:USERPROFILE\.claude.
@@ -23,6 +33,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
+    [ValidateSet('auto', 'native', 'bash')]
+    [string]$HookImpl = 'auto',
     [string]$ClaudeHome = (Join-Path $env:USERPROFILE '.claude')
 )
 
@@ -30,7 +42,9 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Home_     = $env:USERPROFILE
 
-function Copy-Exec($src, $dst) {
+function Copy-Exec {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '')]
+    param($src, $dst)
     if (-not (Test-Path $src)) { throw "Source not found: $src" }
     $dir = Split-Path -Parent $dst
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -43,7 +57,7 @@ function Copy-Exec($src, $dst) {
 # 1. Canonical judge.
 Write-Host 'Canonical judge:' -ForegroundColor Cyan
 $CanonDst = Join-Path $Home_ '.githooks\git-guard.sh'
-Copy-Exec (Join-Path $ScriptDir 'git-guard.sh') $CanonDst
+Copy-Exec (Join-Path $ScriptDir 'src\git-guard.sh') $CanonDst
 
 # 2. Git template + init.templateDir.
 Write-Host 'Git template (arms every future init/clone):' -ForegroundColor Cyan
@@ -60,15 +74,63 @@ if ($curTmpl -eq $TmplDir) {
     if ($curTmpl) { Write-Host "  (was: $curTmpl)" -ForegroundColor Yellow }
 }
 
-# 3. Thin Claude hook + settings.json swap.
+# 3. Decide which Claude-hook implementation to deploy.
+#    The exe is the hot path; prefer it, but degrade gracefully to bash.
+$ExeSrc = Join-Path $ScriptDir 'csharp\bin\Release\net9.0\win-x64\publish\claude-git-guard.exe'
+
+function Invoke-NativeHookBuild {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '')]
+    param()
+    $proj = Join-Path $ScriptDir 'csharp'
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        Write-Host '  dotnet SDK not found — cannot build native hook.' -ForegroundColor Yellow
+        return $false
+    }
+    # NativeAOT links via MSVC; its target shells out to vswhere.exe, which is
+    # often not on PATH. Add the standard installer dir so the link step works.
+    $vswhereDir = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer'
+    if ((Test-Path (Join-Path $vswhereDir 'vswhere.exe')) -and ($env:PATH -notlike "*$vswhereDir*")) {
+        $env:PATH = "$env:PATH;$vswhereDir"
+    }
+    Write-Host '  building native hook (dotnet publish, first run is slow)...' -ForegroundColor DarkGray
+    if ($PSCmdlet.ShouldProcess($proj, 'dotnet publish -r win-x64 -c Release')) {
+        Push-Location $proj
+        try { & dotnet publish -r win-x64 -c Release | Out-Null }
+        finally { Pop-Location }
+    }
+    return (Test-Path $ExeSrc)
+}
+
+$useNative = $false
+switch ($HookImpl) {
+    'bash'   { $useNative = $false }
+    'native' { $useNative = (Test-Path $ExeSrc) -or (Invoke-NativeHookBuild) ; if (-not $useNative) { throw 'HookImpl=native requested but the exe is not built and could not be built.' } }
+    'auto'   { $useNative = (Test-Path $ExeSrc) -or (Invoke-NativeHookBuild) }
+}
+
 Write-Host 'Thin Claude PreToolUse hook:' -ForegroundColor Cyan
-$HookDst = Join-Path $ClaudeHome 'hooks\claude-git-guard.sh'
-Copy-Exec (Join-Path $ScriptDir 'claude-git-guard.sh') $HookDst
+if ($useNative) {
+    $HookDst = Join-Path $ClaudeHome 'hooks\claude-git-guard.exe'
+    Copy-Exec $ExeSrc $HookDst
+    $NewCmd  = '~/.claude/hooks/claude-git-guard.exe'
+    Write-Host '  (native NativeAOT build -- the fast hot-path hook)' -ForegroundColor DarkGray
+} else {
+    $HookDst = Join-Path $ClaudeHome 'hooks\claude-git-guard.sh'
+    Copy-Exec (Join-Path $ScriptDir 'src\claude-git-guard.sh') $HookDst
+    $NewCmd  = '~/.claude/hooks/claude-git-guard.sh'
+    Write-Host '  (bash build -- install the .NET SDK + re-run for the faster native hook)' -ForegroundColor DarkGray
+}
+
+# Older / sibling commands to strip so only ONE git-guard entry remains.
+$claudeFwd = ($ClaudeHome -replace '\\', '/') + '/hooks'
+$OldCmds = @(
+    '~/.claude/hooks/block-git-write.sh',
+    ('bash "{0}/block-git-write.sh"' -f $claudeFwd),
+    '~/.claude/hooks/claude-git-guard.sh',
+    '~/.claude/hooks/claude-git-guard.exe'
+) | Where-Object { $_ -ne $NewCmd }
 
 $SettingsPath = Join-Path $ClaudeHome 'settings.json'
-$NewCmd = '~/.claude/hooks/claude-git-guard.sh'
-$OldCmds = @('~/.claude/hooks/block-git-write.sh', ('bash "{0}"' -f (($ClaudeHome -replace '\\','/') + '/hooks/block-git-write.sh')))
-
 if (-not (Test-Path $SettingsPath)) { throw "settings.json not found at $SettingsPath" }
 $settings = (Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8) | ConvertFrom-Json
 
@@ -87,7 +149,7 @@ if (-not $bashEntry) {
     $settings.hooks.PreToolUse = $preList
 }
 
-# Rebuild the Bash hooks list: drop any old block-git-write entry, ensure the
+# Rebuild the Bash hooks list: drop any old/sibling git-guard entry, ensure the
 # new one is present exactly once. Preserve every other hook (python, ev, ...).
 $kept = @($bashEntry.hooks | Where-Object {
     ($OldCmds -notcontains $_.command) -and ($_.command -ne $NewCmd)
@@ -95,10 +157,10 @@ $kept = @($bashEntry.hooks | Where-Object {
 $newEntry = [pscustomobject]@{ type = 'command'; command = $NewCmd; timeout = 10 }
 $bashEntry.hooks = @($kept) + $newEntry
 
-if ($PSCmdlet.ShouldProcess($SettingsPath, 'Swap block-git-write -> claude-git-guard in PreToolUse:Bash')) {
+if ($PSCmdlet.ShouldProcess($SettingsPath, "Register $NewCmd in PreToolUse:Bash")) {
     $json = $settings | ConvertTo-Json -Depth 20
     Set-Content -LiteralPath $SettingsPath -Value $json -Encoding UTF8
-    Write-Host "  registered $NewCmd (removed any old block-git-write.sh)" -ForegroundColor Green
+    Write-Host "  registered $NewCmd (removed any older git-guard entry)" -ForegroundColor Green
 }
 
 Write-Host ''

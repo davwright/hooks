@@ -5,16 +5,20 @@
 # Run: bash claude-git-guard.test.sh   (exit 0 = all pass)
 
 set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Which implementation to test. Default: the bash hook, run via `bash`.
-# Override to test the NativeAOT C# port:
-#   GUARD_CMD="<path>/claude-git-guard.exe" bash claude-git-guard.test.sh
+# Override to test the NativeAOT C# port — either give a full path, or just
+# say `exe` to use the built binary under csharp/:
+#   GUARD_CMD=exe bash tests/claude-git-guard.test.sh
+#   GUARD_CMD="<path>/claude-git-guard.exe" bash tests/claude-git-guard.test.sh
 # GUARD_CMD is invoked directly (the exe needs no interpreter); the default
 # bash hook is prefixed with `bash` so it runs the same on Windows.
-GUARD_CMD="${GUARD_CMD:-bash $(dirname "$0")/claude-git-guard.sh}"
+GUARD_CMD="${GUARD_CMD:-bash $ROOT/src/claude-git-guard.sh}"
+[ "$GUARD_CMD" = "exe" ] && GUARD_CMD="$ROOT/csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe"
 # Sanity-check the runner resolves to something that exists.
 _RUNNER=${GUARD_CMD%% *}
 case "$_RUNNER" in
-  bash) [ -f "$(dirname "$0")/claude-git-guard.sh" ] || { echo "FATAL: claude-git-guard.sh not found" >&2; exit 2; } ;;
+  bash) [ -f "$ROOT/src/claude-git-guard.sh" ] || { echo "FATAL: claude-git-guard.sh not found" >&2; exit 2; } ;;
   *)    [ -x "$_RUNNER" ] || [ -f "$_RUNNER" ] || { echo "FATAL: GUARD_CMD runner not found: $_RUNNER" >&2; exit 2; } ;;
 esac
 echo "# runner: $GUARD_CMD"
@@ -28,8 +32,8 @@ TMP=$(mktemp -d -p "$_REALHOME"); trap "rm -rf '$TMP'" EXIT
 # Deploy a fake git template so self-heal has stubs to install from. This also
 # becomes the HOME the hook sees, so self-heal reads its stubs from here.
 export HOME="$TMP/home"; mkdir -p "$HOME/.git-template/hooks"
-cp "$(dirname "$0")/templates/hooks/pre-commit" "$HOME/.git-template/hooks/pre-commit"
-cp "$(dirname "$0")/templates/hooks/pre-push"   "$HOME/.git-template/hooks/pre-push"
+cp "$ROOT/templates/hooks/pre-commit" "$HOME/.git-template/hooks/pre-commit"
+cp "$ROOT/templates/hooks/pre-push"   "$HOME/.git-template/hooks/pre-push"
 
 ALLOWED="$TMP/allowed"; FOREIGN="$TMP/foreign"
 git init -q "$ALLOWED"; git -C "$ALLOWED" remote add origin 'https://github.com/me/x.git'

@@ -1,116 +1,168 @@
-# hooks — two-layer git-write guard
+# git-write guard for Claude Code
 
-Stops an AI agent (Claude Code) from accidentally committing or pushing to a
-**non-whitelisted** git repo (customer repos), while letting whitelisted repos
-through. Whitelist: `github.com` and `dev.azure.com/evolx/`.
+Stops an AI coding agent (Claude Code) from **accidentally committing or pushing
+to the wrong git repo** — typically a customer's repo you have checked out
+locally. Commits and pushes to repos you've whitelisted go through untouched;
+everything else is blocked with a clear message.
 
-## Why two layers
+Whitelisted by default: **`github.com`** and **`dev.azure.com/evolx/`**.
+Everything else is refused.
 
-A Claude Code `PreToolUse` hook only ever sees the raw **shell string** of a
-command. Judging git safety from a string means regex-parsing, quote-stripping,
-and chasing `cd` / `git -C` / `GIT_DIR=` redirects — fragile, and the source of
-every false-positive this guard has ever had (e.g. the path segment `git` in
-`c:\git\...` read as the `git` command).
+---
 
-So the real judging moved to where the data is clean:
+## Quick start
+
+From a PowerShell prompt, in this folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
+```
+
+That's it. The installer is idempotent — safe to re-run any time. Then **restart
+any open Claude Code sessions** so they pick up the hook.
+
+Preview first without changing anything:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -WhatIf
+```
+
+### What the installer does
+
+1. Installs the **whitelist judge** to `~\.githooks\git-guard.sh`.
+2. Installs a **git template** to `~\.git-template\hooks\` and points
+   `git config --global init.templateDir` at it — so every future
+   `git init` / `git clone` is guarded automatically, with zero extra steps.
+3. Installs the **Claude Code hook** to `~\.claude\hooks\` and registers it in
+   `~\.claude\settings.json`. By default it installs the fast native build (see
+   [Native vs bash](#native-vs-bash)); if your machine can't build it, it
+   silently falls back to the shell version.
+
+---
+
+## Does it work? (verify in 10 seconds)
+
+Open a Claude Code session and ask it to run these. The first is allowed, the
+second is blocked:
+
+```bash
+git status                       # allowed — read-only
+git commit --no-verify -m test   # BLOCKED — --no-verify bypasses the guard
+```
+
+A blocked command prints a one-line reason and Claude sees it as a refusal.
+
+---
+
+## Changing the whitelist
+
+Edit the `WHITELIST` array near the top of `~\.githooks\git-guard.sh` (the
+deployed copy) and the small mirror in the Claude hook. The patterns are
+case-insensitive regexes matched against the remote URL, e.g.:
+
+```bash
+WHITELIST=(
+  'github\.com'
+  'dev\.azure\.com/evolx/'
+  'gitlab\.com/myorg/'      # <- add your own
+)
+```
+
+The source of truth lives in this repo at [`src/git-guard.sh`](src/git-guard.sh);
+edit there, re-run `Install.ps1`, and every repo picks it up on its next
+commit/push (they all call the one deployed file — no per-repo updates needed).
+
+---
+
+## How it works (two layers)
+
+A Claude Code hook only ever sees the **raw shell string** of a command. Judging
+git safety from a string alone is fragile (the path `c:\git\...` contains the
+word `git`, quotes and `cd` and `GIT_DIR=` have to be chased, …) — that fragility
+was the source of every false alarm this guard ever had.
+
+So the real decision moved to where the data is clean — git's own hooks:
 
 ```
 Claude runs a git command
    │
    ▼
-claude-git-guard.sh   (global Claude PreToolUse hook, THIN)
-   • block --no-verify/-n on commit|push   ← git hooks can't catch this
-   • block GIT_DIR=/--git-dir redirects, remote-mutation, config remote.*
-   • allow `remote add <whitelisted-url>`  ← fresh-init flow
-   • ensure target repo has the guard hook installed (self-heal); else block
-   • otherwise: get out of the way
+claude-git-guard  (Claude PreToolUse hook — THIN)
+   • blocks --no-verify / -n          ← git hooks can't catch this; it skips them
+   • blocks GIT_DIR= / --git-dir redirects, remote re-pointing, config remote.*
+   • allows `remote add <whitelisted-url>`   ← fresh-init flow
+   • installs the guard into the target repo if missing (self-heal); else blocks
+   • otherwise gets out of the way
    │
    ▼
-.git/hooks/pre-commit, pre-push   →  exec  git-guard.sh   (per-repo, REAL JUDGE)
-   • pre-push:   whitelist-check the destination URL git hands it in argv
-   • pre-commit: whitelist-check the repo's configured push remote (strict)
-   • exit nonzero → git aborts
+.git/hooks/pre-commit & pre-push  →  git-guard.sh  (per-repo — the REAL judge)
+   • pre-push:   whitelist-checks the destination URL git hands it directly
+   • pre-commit: whitelist-checks the repo's configured push remote
+   • refuses (non-zero) → git aborts the operation
 ```
 
-The git layer sees **exact, unobfuscated arguments from git itself** — `pre-push`
-is literally handed the destination URL. No string parsing.
+The git layer is handed **exact, unobfuscated arguments by git itself** — no
+string guessing.
 
-## Files
+---
 
-| File | Role |
+## Native vs bash
+
+The Claude hook fires on **every** Bash command Claude runs, so its startup cost
+is recurring latency. On Windows the shell version pays the MSYS `bash.exe`
+startup tax (~0.5 s) on every call. The repo ships a **NativeAOT C# port** with
+an identical contract that runs ~3–4× faster (measured: 852 → 276 ms on a
+non-git command). `Install.ps1` prefers it automatically.
+
+| | |
 |---|---|
-| `git-guard.sh` | **Canonical judge.** `git-guard.sh pre-commit\|pre-push <args>`. Holds the whitelist + `is_whitelisted`. |
-| `templates/hooks/pre-commit`, `pre-push` | Thin stubs that `exec` the canonical. Carry a `git-guard-stub vN` marker. |
-| `claude-git-guard.sh` | Thin Claude PreToolUse hook (belt + self-heal). |
-| `Install.ps1` | Idempotent installer (see below). |
-| `*.test.sh` | Offline test suites. `bash git-guard.test.sh`, `bash claude-git-guard.test.sh`. |
+| Force the native build | `Install.ps1 -HookImpl native` |
+| Force the shell build | `Install.ps1 -HookImpl bash` |
+| Default | `auto` — native if buildable, else bash |
 
-## How updates propagate (no drift)
+Building native needs the **.NET SDK** and the **VS C++ build tools** (MSVC).
+Without them, `auto` just uses bash — no error.
 
-The stub is **near-static** — it just `exec`s `$HOME/.githooks/git-guard.sh`.
-All the logic is in that one canonical file, which every repo's stub calls. So:
+---
 
-- **Edit the logic** → edit `git-guard.sh`, re-run `Install.ps1`. Every repo
-  picks it up on its next commit/push, because they all `exec` the same file.
-  No re-copying repos, no sweep.
-- **Self-update**: the canonical refreshes a repo's stub from the template if
-  the stub's version marker is stale (local only — never touches the network).
-- **Self-heal**: the Claude hook installs the stub the first time it sees a
-  commit/push in an un-armed repo. It will **not** clobber a foreign hook
-  (husky etc.) — it blocks and warns instead.
+## Repo layout
 
-New repos are armed automatically: `Install.ps1` sets
-`git config --global init.templateDir`, so every future `git init` / `git clone`
-copies the stubs into `.git/hooks/`. Git never runs repo-committed hooks on
-clone (a security guarantee), so a machine-global template is the only way to
-arm fresh clones with zero per-repo action.
-
-## Install
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -WhatIf  # preview
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
+```
+README.md            you are here
+Install.ps1          idempotent installer
+src/                 the two hook scripts (edit these)
+  git-guard.sh         canonical whitelist judge (holds the WHITELIST)
+  claude-git-guard.sh  thin Claude PreToolUse hook
+templates/hooks/     thin stubs copied into each repo's .git/hooks
+  pre-commit  pre-push
+csharp/              NativeAOT port of the Claude hook (+ bench.sh)
+tests/               offline test suites
+  git-guard.test.sh  claude-git-guard.test.sh
 ```
 
-It deploys the canonical to `$HOME\.githooks\`, the template stubs to
-`$HOME\.git-template\hooks\` (+ sets `init.templateDir`), the thin hook to
-`~\.claude\hooks\`, and swaps the old `block-git-write.sh` entry in
-`~\.claude\settings.json` for `claude-git-guard.sh`. Restart open Claude Code
-sessions afterward.
-
-## NativeAOT port (the hot path)
-
-The Claude hook fires on **every** Bash tool call, so its per-invocation startup
-cost is recurring latency. On Windows that cost is dominated by the MSYS
-`bash.exe` layer (~550 ms before any logic). [`csharp/`](csharp/) is a NativeAOT
-C# port with an identical contract (PreToolUse JSON on stdin, exit 0 allow / 2
-block). Measured on this machine (30 iters): non-git fast-bail 852 → 276 ms
-(~3×), git command 2023 → 467 ms (~4×).
+### Running the tests
 
 ```bash
-cd csharp && dotnet publish -r win-x64 -c Release   # needs vswhere.exe on PATH
+bash tests/git-guard.test.sh                 # the judge
+bash tests/claude-git-guard.test.sh          # the Claude hook (bash build)
+GUARD_CMD=exe bash tests/claude-git-guard.test.sh   # same suite, native build
 ```
 
-The same suite drives either implementation:
+All green = the two implementations behave identically.
 
-```bash
-bash claude-git-guard.test.sh                                    # bash hook
-GUARD_CMD="csharp/bin/.../claude-git-guard.exe" bash claude-git-guard.test.sh  # exe
-```
-
-Both pass 23/23. The exe adds one behaviour over a naive port: it translates
-MSYS POSIX paths (`/c/Users/x`, the `cwd` in the hook JSON) to Windows form
-before any Win32 filesystem op or child-process working dir — a native process
-can't `chdir` to a `/c/...` path the way the bash hook can under MSYS.
+---
 
 ## Known limits
 
-- **`--no-verify` is caught only at the Claude layer** — it skips git hooks
-  entirely, so the git layer is blind to it. A `--no-verify` commit typed
-  manually in a terminal (outside Claude) is not guarded.
+- **`--no-verify` is caught only at the Claude layer.** It skips git hooks
+  entirely, so the git layer is blind to it. A `--no-verify` commit typed by hand
+  in a terminal (outside Claude) is not guarded — that's by design: the *agent*
+  is what's being guarded.
 - **A repo Claude has never touched is unarmed** until its first Claude
-  commit/push (self-heal) or its next `git init`/`clone` (template). This is the
-  accepted threat model: the *agent* is what's guarded, and the agent always
-  passes through the Claude hook.
-- **Whitelist** lives in two places kept in sync: `git-guard.sh` (the judge) and
-  a small mirror in `claude-git-guard.sh` (only for the `remote add` exception).
+  commit/push (self-heal installs the guard then) or its next `git init` / clone
+  (the template arms it). Git deliberately never runs a cloned repo's committed
+  hooks, so a machine-global template is the only way to arm fresh clones with no
+  manual step.
+- **The whitelist lives in two synced places**: `src/git-guard.sh` (the judge)
+  and a small mirror in `src/claude-git-guard.sh` (only for the `remote add`
+  exception). Keep them in step.

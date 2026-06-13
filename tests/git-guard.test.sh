@@ -5,7 +5,8 @@
 # Run: bash git-guard.test.sh   (exit 0 = all pass)
 
 set -u
-GUARD="$(cd "$(dirname "$0")" && pwd)/git-guard.sh"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GUARD="$ROOT/src/git-guard.sh"
 [ -f "$GUARD" ] || { echo "FATAL: git-guard.sh not found at $GUARD" >&2; exit 2; }
 
 TMP=$(mktemp -d); trap "rm -rf '$TMP'" EXIT

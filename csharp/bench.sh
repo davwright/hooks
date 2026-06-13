@@ -4,7 +4,7 @@
 # Method: wall-clock over N invocations via date +%s%N, same as the prior session.
 set -u
 cd "$(dirname "$0")/.."
-BASH_HOOK="claude-git-guard.sh"
+BASH_HOOK="src/claude-git-guard.sh"
 EXE="csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe"
 N=30
 
