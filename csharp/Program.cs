@@ -110,10 +110,16 @@ internal static partial class Program
             string sub = RemoteSubFrom(stripped);
             if (sub is "add" or "set-url")
             {
+                // URL is taken as the LAST token. If the command is chained
+                // (... && other) or ends in a flag, that token isn't the URL —
+                // say so instead of the misleading "non-whitelisted URL".
                 string url = LastToken(stripped);
                 if (url.Length > 0 && IsWhitelistedUrl(url))
                     return 0;
-                Console.Error.WriteLine($"BLOCKED: git remote {sub} to a non-whitelisted URL is not allowed (would let a later push bypass the guard). Whitelisted: github.com, dev.azure.com/evolx/. Run manually if intended.");
+                if (url.Contains("://") || (url.Contains('@') && url.Contains(':')))
+                    Console.Error.WriteLine($"BLOCKED: git remote {sub} points at a non-whitelisted URL: '{url}'. Whitelisted: github.com, dev.azure.com/evolx/. If it's a customer repo this is intended; run it yourself in a terminal.");
+                else
+                    Console.Error.WriteLine($"BLOCKED: git remote {sub} -- couldn't verify the destination URL (the guard reads the LAST word of the command, but here that's '{url}'). Run it UNCHAINED with the URL last, e.g. 'git remote {sub} origin https://github.com/you/repo.git', then continue.");
                 return 2;
             }
             Console.Error.WriteLine($"BLOCKED: git remote {sub} is not allowed (remove/rename/prune/set-* have no automated use and could repoint the guard). Run manually if intended.");

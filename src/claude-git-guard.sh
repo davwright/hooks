@@ -149,9 +149,17 @@ main() {
     sub=$(printf '%s' "$_STRIPPED" | sed -n 's/.*remote[[:space:]]\+\([a-z-]\+\).*/\1/p')
     case "$sub" in
       add|set-url)
+        # The URL is taken as the LAST token of the command. This breaks if the
+        # command is chained (... && other) or has a trailing flag, so the last
+        # token isn't the URL — tell the user exactly that instead of the
+        # misleading "non-whitelisted URL".
         url=$(printf '%s' "$_STRIPPED" | awk '{print $NF}')
         if [[ -n $url ]] && is_whitelisted_url "$url"; then exit 0; fi
-        echo "BLOCKED: git remote $sub to a non-whitelisted URL is not allowed (would let a later push bypass the guard). Whitelisted: github.com, dev.azure.com/evolx/. Run manually if intended." >&2
+        if [[ $url == *://* || $url == *@*:* ]]; then
+          echo "BLOCKED: git remote $sub points at a non-whitelisted URL: '$url'. Whitelisted: github.com, dev.azure.com/evolx/. If it's a customer repo this is intended; run it yourself in a terminal." >&2
+        else
+          echo "BLOCKED: git remote $sub — couldn't verify the destination URL (the guard reads the LAST word of the command, but here that's '$url'). Run it UNCHAINED with the URL last, e.g. 'git remote $sub origin https://github.com/you/repo.git', then continue." >&2
+        fi
         exit 2 ;;
       *)
         echo "BLOCKED: git remote $sub is not allowed (remove/rename/prune/set-* have no automated use and could repoint the guard). Run manually if intended." >&2

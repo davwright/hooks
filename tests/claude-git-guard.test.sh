@@ -73,6 +73,9 @@ check 0 "$(run "$ALLOWED" 'git remote add origin https://evolx@dev.azure.com/evo
 check 2 "$(run "$ALLOWED" 'git remote add evil https://evil.example/x.git')"              'remote add non-whitelisted -> blocked'
 check 2 "$(run "$ALLOWED" 'git remote remove origin')"                                    'remote remove -> blocked'
 check 2 "$(run "$ALLOWED" 'git remote set-url origin https://evil/x')"                    'remote set-url non-whitelisted -> blocked'
+# URL is read as the LAST token, so a whitelisted URL followed by a chain/flag
+# still blocks (fail-safe). The message tells the user to run it unchained.
+check 2 "$(run "$ALLOWED" 'git remote set-url origin https://github.com/me/z.git && git fetch')" 'remote set-url whitelisted but chained -> blocked'
 
 echo "== belt: config remote.* =="
 check 2 "$(run "$ALLOWED" 'git config remote.origin.url https://evil/x')"  'config remote.url write -> blocked'
