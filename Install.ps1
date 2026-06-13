@@ -1,26 +1,25 @@
 <#
 .SYNOPSIS
-    Install the block-git-write hook into the local Claude Code config.
+    Install the two-layer git-write guard.
 
 .DESCRIPTION
-    Copies block-git-write.sh into ~\.claude\hooks\ and registers it as a
-    PreToolUse:Bash hook in ~\.claude\settings.json. Idempotent: re-running
-    overwrites the script in place; the settings entry is added only if it
-    is not already present.
+    Deploys:
+      1. The canonical judge  -> $HOME\.githooks\git-guard.sh
+      2. The git template     -> $HOME\.git-template\hooks\{pre-commit,pre-push}  (thin stubs)
+                                 + sets git config --global init.templateDir
+         so every future `git init` / `git clone` is armed automatically.
+      3. The thin Claude hook -> ~\.claude\hooks\claude-git-guard.sh
+                                 + registers it in ~\.claude\settings.json under
+                                 PreToolUse:Bash, REPLACING the old block-git-write.sh
+                                 entry if present (no protection gap, no duplicate).
+
+    Idempotent: re-running overwrites scripts in place and de-dupes the settings entry.
 
 .PARAMETER ClaudeHome
-    Override the Claude Code config directory. Defaults to $env:USERPROFILE\.claude.
+    Override the Claude Code config dir. Defaults to $env:USERPROFILE\.claude.
 
 .PARAMETER WhatIf
-    Preview the changes without writing anything.
-
-.EXAMPLE
-    .\Install.ps1
-    Install with defaults.
-
-.EXAMPLE
-    .\Install.ps1 -WhatIf
-    Show what would change.
+    Preview without writing.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -29,97 +28,80 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Source    = Join-Path $ScriptDir 'block-git-write.sh'
+$Home_     = $env:USERPROFILE
 
-if (-not (Test-Path $Source)) {
-    throw "Source hook not found at $Source. Run from the repo root."
-}
-
-# 1. Make sure ~/.claude/hooks exists.
-$HooksDir = Join-Path $ClaudeHome 'hooks'
-if (-not (Test-Path $HooksDir)) {
-    if ($PSCmdlet.ShouldProcess($HooksDir, 'Create directory')) {
-        New-Item -ItemType Directory -Path $HooksDir -Force | Out-Null
-        Write-Host "Created $HooksDir" -ForegroundColor Green
+function Copy-Exec($src, $dst) {
+    if (-not (Test-Path $src)) { throw "Source not found: $src" }
+    $dir = Split-Path -Parent $dst
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($PSCmdlet.ShouldProcess($dst, 'Deploy')) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        Write-Host "  -> $dst" -ForegroundColor Green
     }
 }
 
-# 2. Copy block-git-write.sh.
-$Dest = Join-Path $HooksDir 'block-git-write.sh'
-if ($PSCmdlet.ShouldProcess($Dest, 'Copy hook script')) {
-    Copy-Item -LiteralPath $Source -Destination $Dest -Force
-    Write-Host "Copied hook to $Dest" -ForegroundColor Green
+# 1. Canonical judge.
+Write-Host 'Canonical judge:' -ForegroundColor Cyan
+$CanonDst = Join-Path $Home_ '.githooks\git-guard.sh'
+Copy-Exec (Join-Path $ScriptDir 'git-guard.sh') $CanonDst
+
+# 2. Git template + init.templateDir.
+Write-Host 'Git template (arms every future init/clone):' -ForegroundColor Cyan
+$TmplHooks = Join-Path $Home_ '.git-template\hooks'
+Copy-Exec (Join-Path $ScriptDir 'templates\hooks\pre-commit') (Join-Path $TmplHooks 'pre-commit')
+Copy-Exec (Join-Path $ScriptDir 'templates\hooks\pre-push')   (Join-Path $TmplHooks 'pre-push')
+$TmplDir = (Join-Path $Home_ '.git-template') -replace '\\', '/'
+$curTmpl = (& git config --global init.templateDir) 2>$null
+if ($curTmpl -eq $TmplDir) {
+    Write-Host "  init.templateDir already = $TmplDir" -ForegroundColor DarkGray
+} elseif ($PSCmdlet.ShouldProcess('git config --global init.templateDir', "set to $TmplDir")) {
+    & git config --global init.templateDir $TmplDir
+    Write-Host "  set init.templateDir = $TmplDir" -ForegroundColor Green
+    if ($curTmpl) { Write-Host "  (was: $curTmpl)" -ForegroundColor Yellow }
 }
 
-# 3. Register the hook in settings.json. PreToolUse hooks are matched by
-#    a tool-name pattern; we register against Bash. The shape mirrors what
-#    Claude Code expects:
-#
-#      {
-#        "hooks": {
-#          "PreToolUse": [
-#            { "matcher": "Bash", "hooks": [ { "type": "command", "command": "<path>" } ] }
-#          ]
-#        }
-#      }
-#
-#    We add an entry idempotently: if a Bash matcher already exists, we
-#    append our command to it (deduped); if not, we add a new matcher.
+# 3. Thin Claude hook + settings.json swap.
+Write-Host 'Thin Claude PreToolUse hook:' -ForegroundColor Cyan
+$HookDst = Join-Path $ClaudeHome 'hooks\claude-git-guard.sh'
+Copy-Exec (Join-Path $ScriptDir 'claude-git-guard.sh') $HookDst
+
 $SettingsPath = Join-Path $ClaudeHome 'settings.json'
-$HookCommand  = ('bash "{0}"' -f ($Dest -replace '\\', '/'))
+$NewCmd = '~/.claude/hooks/claude-git-guard.sh'
+$OldCmds = @('~/.claude/hooks/block-git-write.sh', ('bash "{0}"' -f (($ClaudeHome -replace '\\','/') + '/hooks/block-git-write.sh')))
 
-if (Test-Path $SettingsPath) {
-    $raw = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8
-    if (-not $raw.Trim()) { $settings = [pscustomobject]@{} }
-    else { $settings = $raw | ConvertFrom-Json }
-} else {
-    $settings = [pscustomobject]@{}
-}
+if (-not (Test-Path $SettingsPath)) { throw "settings.json not found at $SettingsPath" }
+$settings = (Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8) | ConvertFrom-Json
 
-# Ensure hooks.PreToolUse exists
 if (-not ($settings.PSObject.Properties.Name -contains 'hooks')) {
     Add-Member -InputObject $settings -MemberType NoteProperty -Name 'hooks' -Value ([pscustomobject]@{}) -Force
 }
 if (-not ($settings.hooks.PSObject.Properties.Name -contains 'PreToolUse')) {
     Add-Member -InputObject $settings.hooks -MemberType NoteProperty -Name 'PreToolUse' -Value @() -Force
 }
-
-# Find or create the Bash matcher entry. PreToolUse is a list of objects
-# each with { matcher, hooks: [...] }.
-$preList = @($settings.hooks.PreToolUse)
+$preList   = @($settings.hooks.PreToolUse)
 $bashEntry = $preList | Where-Object { $_.matcher -eq 'Bash' } | Select-Object -First 1
 
-$alreadyRegistered = $false
-if ($bashEntry) {
-    $existing = @($bashEntry.hooks | Where-Object { $_.command -eq $HookCommand })
-    if ($existing.Count -gt 0) { $alreadyRegistered = $true }
+if (-not $bashEntry) {
+    $bashEntry = [pscustomobject]@{ matcher = 'Bash'; hooks = @() }
+    $preList += $bashEntry
+    $settings.hooks.PreToolUse = $preList
 }
 
-if ($alreadyRegistered) {
-    Write-Host "Hook already registered in $SettingsPath - no settings change needed." -ForegroundColor DarkGray
-} else {
-    if ($PSCmdlet.ShouldProcess($SettingsPath, 'Register PreToolUse:Bash hook')) {
-        $hookEntry = [pscustomobject]@{ type = 'command'; command = $HookCommand }
-        if ($bashEntry) {
-            # Append to existing matcher
-            $bashEntry.hooks = @($bashEntry.hooks) + $hookEntry
-        } else {
-            # New matcher
-            $newMatcher = [pscustomobject]@{
-                matcher = 'Bash'
-                hooks   = @($hookEntry)
-            }
-            $preList += $newMatcher
-            $settings.hooks.PreToolUse = $preList
-        }
-        $json = $settings | ConvertTo-Json -Depth 10
-        Set-Content -LiteralPath $SettingsPath -Value $json -Encoding UTF8
-        Write-Host "Registered hook in $SettingsPath" -ForegroundColor Green
-    }
+# Rebuild the Bash hooks list: drop any old block-git-write entry, ensure the
+# new one is present exactly once. Preserve every other hook (python, ev, ...).
+$kept = @($bashEntry.hooks | Where-Object {
+    ($OldCmds -notcontains $_.command) -and ($_.command -ne $NewCmd)
+})
+$newEntry = [pscustomobject]@{ type = 'command'; command = $NewCmd; timeout = 10 }
+$bashEntry.hooks = @($kept) + $newEntry
+
+if ($PSCmdlet.ShouldProcess($SettingsPath, 'Swap block-git-write -> claude-git-guard in PreToolUse:Bash')) {
+    $json = $settings | ConvertTo-Json -Depth 20
+    Set-Content -LiteralPath $SettingsPath -Value $json -Encoding UTF8
+    Write-Host "  registered $NewCmd (removed any old block-git-write.sh)" -ForegroundColor Green
 }
 
 Write-Host ''
 Write-Host 'Done.' -ForegroundColor Cyan
-Write-Host 'Whitelist (case-insensitive grep -E patterns) is at the top of:'
-Write-Host "  $Dest" -ForegroundColor Yellow
-Write-Host 'Edit it for your environment, then restart any open Claude Code sessions.'
+Write-Host 'Whitelist lives in:' -NoNewline; Write-Host "  $CanonDst" -ForegroundColor Yellow
+Write-Host 'Restart open Claude Code sessions to pick up the new PreToolUse hook.'

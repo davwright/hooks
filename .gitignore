@@ -1,3 +1,4 @@
 # Test scratch
 /tmp/
 *.tmp.txt
+.vscode/

@@ -1,0 +1,5 @@
+# Shell scripts and git hooks MUST be LF — they run under bash; a CRLF in the
+# shebang line breaks the interpreter ("bad interpreter: /bin/bash^M").
+*.sh           text eol=lf
+templates/hooks/pre-commit  text eol=lf
+templates/hooks/pre-push    text eol=lf
