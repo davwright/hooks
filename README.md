@@ -78,6 +78,31 @@ It deploys the canonical to `$HOME\.githooks\`, the template stubs to
 `~\.claude\settings.json` for `claude-git-guard.sh`. Restart open Claude Code
 sessions afterward.
 
+## NativeAOT port (the hot path)
+
+The Claude hook fires on **every** Bash tool call, so its per-invocation startup
+cost is recurring latency. On Windows that cost is dominated by the MSYS
+`bash.exe` layer (~550 ms before any logic). [`csharp/`](csharp/) is a NativeAOT
+C# port with an identical contract (PreToolUse JSON on stdin, exit 0 allow / 2
+block). Measured on this machine (30 iters): non-git fast-bail 852 → 276 ms
+(~3×), git command 2023 → 467 ms (~4×).
+
+```bash
+cd csharp && dotnet publish -r win-x64 -c Release   # needs vswhere.exe on PATH
+```
+
+The same suite drives either implementation:
+
+```bash
+bash claude-git-guard.test.sh                                    # bash hook
+GUARD_CMD="csharp/bin/.../claude-git-guard.exe" bash claude-git-guard.test.sh  # exe
+```
+
+Both pass 23/23. The exe adds one behaviour over a naive port: it translates
+MSYS POSIX paths (`/c/Users/x`, the `cwd` in the hook JSON) to Windows form
+before any Win32 filesystem op or child-process working dir — a native process
+can't `chdir` to a `/c/...` path the way the bash hook can under MSYS.
+
 ## Known limits
 
 - **`--no-verify` is caught only at the Claude layer** — it skips git hooks
