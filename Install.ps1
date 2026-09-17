@@ -5,7 +5,7 @@
 .DESCRIPTION
     Deploys:
       1. The canonical judge  -> $HOME\.githooks\git-guard.sh
-      2. The git template     -> $HOME\.git-template\hooks\{pre-commit,pre-push}  (thin stubs)
+      2. The git template     -> $HOME\.git-template\hooks\{pre-commit,commit-msg,pre-push}  (thin stubs)
                                  + sets git config --global init.templateDir
          so every future `git init` / `git clone` is armed automatically.
       3. The thin Claude hook -> ~\.claude\hooks\claude-git-guard.{exe|sh}
@@ -62,8 +62,9 @@ Copy-Exec (Join-Path $ScriptDir 'src\git-guard.sh') $CanonDst
 # 2. Git template + init.templateDir.
 Write-Host 'Git template (arms every future init/clone):' -ForegroundColor Cyan
 $TmplHooks = Join-Path $Home_ '.git-template\hooks'
-Copy-Exec (Join-Path $ScriptDir 'templates\hooks\pre-commit') (Join-Path $TmplHooks 'pre-commit')
-Copy-Exec (Join-Path $ScriptDir 'templates\hooks\pre-push')   (Join-Path $TmplHooks 'pre-push')
+foreach ($h in @('pre-commit', 'commit-msg', 'pre-push')) {
+    Copy-Exec (Join-Path $ScriptDir "templates\hooks\$h") (Join-Path $TmplHooks $h)
+}
 $TmplDir = (Join-Path $Home_ '.git-template') -replace '\\', '/'
 $curTmpl = (& git config --global init.templateDir) 2>$null
 if ($curTmpl -eq $TmplDir) {

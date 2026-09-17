@@ -2,4 +2,4 @@
 # git-guard-stub v2 — DO NOT EDIT. Thin stub; all logic is in the canonical.
 CANON="$HOME/.githooks/git-guard.sh"
 [ -r "$CANON" ] || { echo "git-guard: canonical missing at $CANON — refusing (fail closed). Run Install.ps1." >&2; exit 1; }
-exec "$CANON" pre-push "$@"
+exec "$CANON" commit-msg "$@"

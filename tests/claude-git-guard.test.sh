@@ -33,11 +33,20 @@ TMP=$(mktemp -d -p "$_REALHOME"); trap "rm -rf '$TMP'" EXIT
 # becomes the HOME the hook sees, so self-heal reads its stubs from here.
 export HOME="$TMP/home"; mkdir -p "$HOME/.git-template/hooks"
 cp "$ROOT/templates/hooks/pre-commit" "$HOME/.git-template/hooks/pre-commit"
+cp "$ROOT/templates/hooks/commit-msg" "$HOME/.git-template/hooks/commit-msg"
 cp "$ROOT/templates/hooks/pre-push"   "$HOME/.git-template/hooks/pre-push"
 
 ALLOWED="$TMP/allowed"; FOREIGN="$TMP/foreign"
 git init -q "$ALLOWED"; git -C "$ALLOWED" remote add origin 'https://github.com/me/x.git'
 git init -q "$FOREIGN"; git -C "$FOREIGN" remote add origin 'https://github.com/me/y.git'
+# Customer repos: the destination rule must block commit AND push here.
+CUST="$TMP/cust"; CUST_SSH="$TMP/cust_ssh"; OWN_SSH="$TMP/own_ssh"
+git init -q "$CUST"; git -C "$CUST" remote add origin \
+  'https://oebb-azure-platform@dev.azure.com/oebb-azure-platform/osis/_git/osis'
+git init -q "$CUST_SSH"; git -C "$CUST_SSH" remote add origin \
+  'git@ssh.dev.azure.com:v3/oebb-azure-platform/osis/osis-integration'
+git init -q "$OWN_SSH"; git -C "$OWN_SSH" remote add origin \
+  'git@ssh.dev.azure.com:v3/evolx/p/r'
 printf '#!/bin/bash\necho hi\n' > "$FOREIGN/.git/hooks/pre-commit"; chmod +x "$FOREIGN/.git/hooks/pre-commit"
 
 PASS=0; FAIL=0
@@ -57,11 +66,44 @@ check 0 "$(run "$ALLOWED" 'ls -la')"               'plain ls'
 check 0 "$(run "$ALLOWED" 'echo "git committee"')" 'prose containing git'
 check 0 "$(run "$ALLOWED" 'cat c:/git/evolx/foo')" 'path segment /git/'
 
+echo "== belt: destination (the Claude-only rule) =="
+check 0 "$(run "$ALLOWED"  'git push')"            'push: own github repo allowed'
+check 0 "$(run "$ALLOWED"  'git commit -m x')"     'commit: own github repo allowed'
+check 0 "$(run "$OWN_SSH"  'git push')"            'push: own ADO evolx ssh allowed'
+check 2 "$(run "$CUST"     'git push')"            'push: customer repo BLOCKED'
+check 2 "$(run "$CUST"     'git commit -m x')"     'commit: customer repo BLOCKED'
+check 2 "$(run "$CUST"     'git push origin main')" 'push: customer by remote name BLOCKED'
+check 2 "$(run "$CUST_SSH" 'git push')"            'push: customer ssh BLOCKED'
+# An explicit URL beats the configured remote: pushing a customer URL from
+# inside an OWN repo must still be blocked.
+check 2 "$(run "$ALLOWED" 'git push https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c main')" \
+  'push: explicit customer URL from own repo BLOCKED'
+# Spoofed own-host URLs are foreign.
+check 2 "$(run "$ALLOWED" 'git push https://github.com.evil.io/x/y.git main')" \
+  'push: github.com.evil.io BLOCKED'
+
 echo "== belt: --no-verify =="
 check 2 "$(run "$ALLOWED" 'git commit --no-verify -m x')" '--no-verify blocked'
 check 2 "$(run "$ALLOWED" 'git commit -n -m x')"          '-n blocked'
 check 2 "$(run "$ALLOWED" 'git push --no-verify')"        'push --no-verify blocked'
 check 0 "$(run "$ALLOWED" 'git commit -m "note --no-verify in msg"')" '--no-verify inside quoted msg allowed'
+# Regression: the shell string-test operator -n is not git's -n. These are
+# ordinary scripting and were being blocked.
+check 0 "$(run "$ALLOWED" 'if [ -n "$x" ]; then git commit -m ok; fi')" 'shell [ -n ] test not treated as git -n'
+check 0 "$(run "$ALLOWED" '[ -n "$x" ] && git push origin main')"       'shell [ -n ] before push allowed'
+check 0 "$(run "$ALLOWED" 'if [ -z "$x" ]; then git push; fi')"         'shell [ -z ] test allowed'
+# A heredoc BODY is data, not flags. A commit message that merely discusses
+# these flags must not be read as using them.
+check 0 "$(run "$ALLOWED" 'git commit -F - <<MSG
+the -n belt matched the shell string-test operator
+MSG')" 'heredoc body mentioning -n allowed'
+check 0 "$(run "$ALLOWED" 'git commit -F - <<MSG
+do not pass --no-verify here
+MSG')" 'heredoc body mentioning --no-verify allowed'
+# ...but a real flag on the command line still blocks, heredoc or not.
+check 2 "$(run "$ALLOWED" 'git commit -n -F - <<MSG
+subject
+MSG')" 'real -n with a heredoc still blocked'
 
 echo "== belt: redirect =="
 check 2 "$(run "$ALLOWED" 'GIT_DIR=/x git commit -m y')"  'GIT_DIR= redirect blocked'

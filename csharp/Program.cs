@@ -1,12 +1,20 @@
 // claude-git-guard — NativeAOT port of claude-git-guard.sh (the THIN Claude Code
 // PreToolUse hook). Same contract: PreToolUse JSON on stdin, exit 0 = allow,
-// exit 2 = block (message on stderr). The whitelist judging lives in the per-repo
-// git hooks (git-guard.sh); this layer only does what the git layer can't:
-//   1. Belt: block shapes git hooks are blind to / that bypass them
+// exit 2 = block (message on stderr).
+//
+// This hook fires ONLY for Claude, by construction — it is a separate execution
+// path, not a flag Claude could clear. So it owns the rule that must bind Claude
+// and not the user:
+//   1. DESTINATION: commit/push may only reach our own repos (github.com,
+//      dev.azure.com/evolx/). The user is trusted to push anywhere, so this
+//      rule cannot live in a per-repo git hook — those fire for everyone.
+//   2. Belt: block shapes git hooks are blind to / that bypass them
 //        (--no-verify, GIT_DIR/--git-dir redirect, remote add/set-url to a
 //         non-whitelisted URL, git config remote.* writes).
-//   2. Self-heal: before commit|push, install our git-hook stub into the target
+//   3. Self-heal: before commit|push, install our git-hook stub into the target
 //      repo (or block if a foreign hook is present).
+// The per-repo git hook (git-guard.sh) owns the CONTENT rule instead: no
+// AI-tool words in a customer repo's history, enforced for everyone.
 // Logic is a faithful port of the bash version — the same test suite must pass
 // against either implementation.
 
@@ -19,7 +27,7 @@ namespace ClaudeGitGuard;
 
 internal static partial class Program
 {
-    const int GuardStubVersion = 1;
+    const int GuardStubVersion = 2;
 
     static string TemplateHooks =>
         Path.Combine(Home, ".git-template", "hooks");
@@ -80,10 +88,10 @@ internal static partial class Program
                 return 2;
             }
 
-            string stripped = StripQuotes(cmd);
-            if (NoVerifyRe().IsMatch(stripped))
+            string stripped = StripQuotes(StripHeredocs(cmd));
+            if (NoVerifyRe().IsMatch(stripped) || GitDashNRe().IsMatch(stripped))
             {
-                Console.Error.WriteLine("BLOCKED: --no-verify / -n is not allowed on commit/push — it bypasses the git-guard hook that judges the destination. Run it manually if you truly intend to skip the guard.");
+                Console.Error.WriteLine("BLOCKED: --no-verify / -n is not allowed on commit/push — it bypasses the git-guard hook that judges the content. Run it manually if you truly intend to skip the guard.");
                 return 2;
             }
 
@@ -94,12 +102,36 @@ internal static partial class Program
                 return 2;
             }
 
-            if (EnsureHook(target) == "foreign")
+            // ── DESTINATION: the rule that binds Claude and only Claude. The
+            // user is trusted to push where they like, so this cannot live in
+            // the per-repo git hook (which fires for everyone and cannot tell
+            // who invoked it — and no env var can establish that either, since
+            // Claude could clear any flag for a child process). This hook is a
+            // separate execution path that only ever runs for Claude. ──
+            var urls = ResolvePushUrls(target, stripped);
+            if (!AllWhitelisted(urls))
             {
-                Console.Error.WriteLine($"BLOCKED: {target}/.git/hooks already has a non-git-guard pre-commit/pre-push hook. Refusing to overwrite it. Install git-guard manually (chain it) or run the command yourself.");
+                Console.Error.WriteLine("BLOCKED: this would commit/push to a repo that is not ours.");
+                if (urls.Count > 0)
+                {
+                    Console.Error.WriteLine("Destination:");
+                    foreach (var u in urls) Console.Error.WriteLine($"  {u}");
+                }
+                else
+                {
+                    Console.Error.WriteLine("Destination could not be determined (no push remote resolved).");
+                }
+                Console.Error.WriteLine("Allowed: github.com, dev.azure.com/evolx/ (incl. ssh form).");
+                Console.Error.WriteLine("If this is a customer repo the block is intended — run it yourself in a terminal.");
                 return 2;
             }
-            return 0; // armed (or deferred): the git hook now does the real judging
+
+            if (EnsureHook(target) == "foreign")
+            {
+                Console.Error.WriteLine($"BLOCKED: {target}/.git/hooks already has a non-git-guard hook. Refusing to overwrite it. Install git-guard manually (chain it) or run the command yourself.");
+                return 2;
+            }
+            return 0; // destination is ours; the git hook now judges CONTENT
         }
 
         // ── Belt 3: remote mutation ──
@@ -138,6 +170,29 @@ internal static partial class Program
 
     // _strip_quotes: char-by-char removal of single/double quoted substrings,
     // including the quote chars. Direct port of the bash state machine.
+    // Remove any heredoc BODY, keeping the command line itself. A commit
+    // message passed as `git commit -F - <<MSG ... MSG` is DATA, not flags:
+    // without this, a message that merely discusses "-n" or "--no-verify" is
+    // read as using them and the commit is refused.
+    static string StripHeredocs(string s)
+    {
+        var sb = new StringBuilder();
+        string? tag = null;
+        foreach (var raw in s.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            if (tag is not null)
+            {
+                if (line == tag) tag = null;
+                continue;
+            }
+            var m = HeredocRe().Match(line);
+            if (m.Success) tag = m.Groups[1].Value;
+            sb.Append(line).Append('\n');
+        }
+        return sb.ToString();
+    }
+
     static string StripQuotes(string s)
     {
         var sb = new StringBuilder(s.Length);
@@ -174,8 +229,12 @@ internal static partial class Program
 
     static bool IsWhitelistedUrl(string url)
     {
+        if (url.Length == 0) return false;
         string lc = url.ToLowerInvariant();
-        return GithubRe().IsMatch(lc) || AdoEvolxRe().IsMatch(lc);
+        if (lc.Contains("..")) return false;   // traversal could leave the org
+        return GithubRe().IsMatch(lc)
+            || AdoEvolxRe().IsMatch(lc)
+            || AdoEvolxSshRe().IsMatch(lc);
     }
 
     // remote sub-verb: first lowercase-hyphen token after "remote ".
@@ -211,7 +270,7 @@ internal static partial class Program
         try { Directory.CreateDirectory(hookdir); } catch { /* best-effort */ }
 
         bool foreign = false;
-        foreach (string h in new[] { "pre-commit", "pre-push" })
+        foreach (string h in new[] { "pre-commit", "commit-msg", "pre-push" })
         {
             string tmpl = Path.Combine(TemplateHooks, h);
             if (!File.Exists(tmpl)) continue;
@@ -247,10 +306,19 @@ internal static partial class Program
         return -1;
     }
 
-    static string? GitHooksDir(string dir)
+    // Run `git -C <dir> <args...>` and return trimmed stdout, or null on any
+    // failure. The single place this process shells out to git.
+    static string? Git(string dir, params string[] args)
     {
         try
         {
+            // Callers hand us whatever the hook JSON carried, which under Git
+            // Bash is a POSIX path (/c/git/...). We are a native Win32 process,
+            // so both WorkingDirectory and `git -C` need Windows form — without
+            // this, git runs outside the repo and reports no remotes, which
+            // reads as "destination could not be determined" and blocks
+            // everything.
+            dir = ToWindowsPath(dir);
             var psi = new System.Diagnostics.ProcessStartInfo("git")
             {
                 RedirectStandardOutput = true,
@@ -260,9 +328,7 @@ internal static partial class Program
             };
             psi.ArgumentList.Add("-C");
             psi.ArgumentList.Add(dir);
-            psi.ArgumentList.Add("rev-parse");
-            psi.ArgumentList.Add("--git-path");
-            psi.ArgumentList.Add("hooks");
+            foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = System.Diagnostics.Process.Start(psi);
             if (p is null) return null;
             string outp = p.StandardOutput.ReadToEnd().Trim();
@@ -271,6 +337,70 @@ internal static partial class Program
             return p.ExitCode == 0 && outp.Length > 0 ? outp : null;
         }
         catch { return null; }
+    }
+
+    static string? GitHooksDir(string dir) =>
+        Git(dir, "rev-parse", "--git-path", "hooks");
+
+    // Where would a push from <dir> land? Ask GIT rather than parsing the
+    // command string. An explicit URL or remote name on the command line wins;
+    // then the branch's upstream remote; then every configured push remote (a
+    // bare `git push` with no upstream could reach any of them).
+    static List<string> ResolvePushUrls(string dir, string stripped)
+    {
+        var urls = new List<string>();
+
+        // An explicit URL argument is the destination, whatever the remotes say.
+        foreach (var tok in stripped.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (tok.Contains("://") || (tok.Contains('@') && tok.Contains(':')))
+            {
+                urls.Add(tok);
+                return urls;
+            }
+        }
+
+        // An explicit remote NAME after `push`.
+        var m = PushRemoteNameRe().Match(stripped);
+        if (m.Success)
+        {
+            var u = Git(dir, "remote", "get-url", "--push", m.Groups[3].Value);
+            if (u is not null) { urls.Add(u); return urls; }
+        }
+
+        // The current branch's upstream remote.
+        var up = Git(dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
+        if (up is not null)
+        {
+            var name = up.Split('/')[0];
+            if (name.Length > 0)
+            {
+                var u = Git(dir, "remote", "get-url", "--push", name);
+                if (u is not null) { urls.Add(u); return urls; }
+            }
+        }
+
+        // Fall back to every push remote.
+        var all = Git(dir, "remote", "-v");
+        if (all is not null)
+        {
+            foreach (var line in all.Split('\n'))
+            {
+                var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 3 && parts[2] == "(push)" && !urls.Contains(parts[1]))
+                    urls.Add(parts[1]);
+            }
+        }
+        return urls;
+    }
+
+    // Every URL must be ours. No URLs at all -> false (fail closed: the
+    // destination could not be established).
+    static bool AllWhitelisted(List<string> urls)
+    {
+        if (urls.Count == 0) return false;
+        foreach (var u in urls) if (!IsWhitelistedUrl(u)) return false;
+        return true;
     }
 
     static bool IsAbsolute(string p) =>
@@ -313,8 +443,20 @@ internal static partial class Program
     [GeneratedRegex(@"(^|\s)--(git-dir|work-tree|namespace)(=|\s|$)")]
     private static partial Regex RedirectFlagRe();
 
-    [GeneratedRegex(@"(^|\s)(--no-verify|-n)(\s|=|$)")]
+    [GeneratedRegex(@"(^|\s)--no-verify(\s|=|$)")]
     private static partial Regex NoVerifyRe();
+
+    // `-n` only counts as git's flag when it follows `git [opts] commit|push`.
+    // The shell's string-test operator in `if [ -n "$x" ]; then git commit ...`
+    // is ordinary scripting and must not be blocked.
+    [GeneratedRegex(@"git(\s+-[^\s]+)*\s+(commit|push)(\s+[^\s]+)*\s+-n(\s|$)")]
+    private static partial Regex GitDashNRe();
+
+    [GeneratedRegex("""<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?""")]
+    private static partial Regex HeredocRe();
+
+    [GeneratedRegex(@"push\s+((-[^\s]+\s+)*)([a-zA-Z0-9._-]+)")]
+    private static partial Regex PushRemoteNameRe();
 
     [GeneratedRegex(@"(^|[^a-zA-Z0-9_])cd\s+[""']?([^""'\s;&|]+)")]
     private static partial Regex CdRe();
@@ -328,11 +470,18 @@ internal static partial class Program
     [GeneratedRegex(@"git-guard-stub v([0-9]+)")]
     private static partial Regex StubMarkerRe();
 
-    [GeneratedRegex(@"github\.com")]
+    // Anchored at the URL start and terminated at the host boundary, so a URL
+    // that merely CONTAINS one of these does not match ('github.com.evil.io/x',
+    // 'https://oebb.example.com/github.com/osis'). Keep in sync with
+    // OWN_REMOTES in git-guard.sh.
+    [GeneratedRegex(@"^(https://|git@|ssh://git@)github\.com[/:]")]
     private static partial Regex GithubRe();
 
-    [GeneratedRegex(@"dev\.azure\.com/evolx/")]
+    [GeneratedRegex(@"^https://([^@/]+@)?dev\.azure\.com/evolx/")]
     private static partial Regex AdoEvolxRe();
+
+    [GeneratedRegex(@"^(ssh://)?git@ssh\.dev\.azure\.com:(v3/)?evolx/")]
+    private static partial Regex AdoEvolxSshRe();
 }
 
 internal sealed class HookInput

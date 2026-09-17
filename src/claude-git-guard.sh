@@ -26,6 +26,25 @@ _GIT='(^|[^[:alnum:]_/\\])git[[:space:]]+([^[:space:]]+[[:space:]]+)*'
 
 # _strip_quotes <s> -> $_STRIPPED with quoted substrings removed (ported from
 # block-git-write.sh:116-128). Pure bash, no fork.
+# _strip_heredocs <s> -> $_STRIPPED_HD with any heredoc BODY removed, keeping
+# the command line itself. A commit message passed as `git commit -F - <<MSG
+# ... MSG` is DATA, not flags: without this, a message that merely discusses
+# "-n" or "--no-verify" is read as using them and the commit is refused.
+_strip_heredocs() {
+  local s="$1" out="" line tag="" in_hd=0
+  while IFS= read -r line; do
+    if [[ $in_hd -eq 1 ]]; then
+      [[ ${line%$'\r'} == "$tag" ]] && in_hd=0
+      continue
+    fi
+    if [[ $line =~ \<\<-?[[:space:]]*\'?\"?([A-Za-z_][A-Za-z0-9_]*)\'?\"? ]]; then
+      tag="${BASH_REMATCH[1]}"; in_hd=1
+    fi
+    out+="$line"$'\n'
+  done <<< "$s"
+  _STRIPPED_HD="$out"
+}
+
 _strip_quotes() {
   local s="$1" out="" i ch q=""
   for (( i=0; i<${#s}; i++ )); do
@@ -62,12 +81,78 @@ resolve_target() {
 
 # is_whitelisted_url <url> -> 0 if matches whitelist. Used only for the
 # remote-add/set-url exception (fresh-init). Kept in sync with git-guard.sh.
+# Own-infrastructure patterns. Anchored at the URL start and terminated at the
+# host boundary, so a URL that merely CONTAINS one of these does not match:
+# 'github.com.evil.io/x' and 'https://oebb.example.com/github.com/osis' are
+# both correctly foreign. Both ADO forms are covered — HTTPS with an optional
+# user@ prefix, and SSH as ssh.dev.azure.com:v3/evolx/ (no slash after the
+# host, which a bare 'dev\.azure\.com/evolx/' pattern silently missed).
+# Keep in sync with OWN_REMOTES in git-guard.sh.
+WHITELIST=(
+  '^(https://|git@|ssh://git@)github\.com[/:]'
+  '^https://([^@/]+@)?dev\.azure\.com/evolx/'
+  '^(ssh://)?git@ssh\.dev\.azure\.com:(v3/)?evolx/'
+)
+
 is_whitelisted_url() {
   local lc=${1,,} pattern
-  for pattern in 'github\.com' 'dev\.azure\.com/evolx/'; do
+  [[ -z $lc ]] && return 1
+  [[ $lc == *..* ]] && return 1     # path traversal could leave the allowed org
+  for pattern in "${WHITELIST[@]}"; do
     [[ $lc =~ $pattern ]] && return 0
   done
   return 1
+}
+
+# resolve_push_urls <dir> <cmd> -> $_PUSH_URLS, newline-separated.
+# Asks GIT where a push would land rather than parsing the command string. An
+# explicit URL or remote name on the command line wins; otherwise the current
+# branch's upstream remote; otherwise every configured push remote (a bare
+# `git push` with no upstream could hit any of them).
+resolve_push_urls() {
+  local dir="$1" cmd="$2" tok url name
+  _PUSH_URLS=""
+
+  # An explicit URL argument is the destination, whatever the remotes say.
+  _strip_quotes "$cmd"
+  for tok in $_STRIPPED; do
+    if [[ $tok == *://* || $tok == *@*:* ]]; then
+      _PUSH_URLS="$tok"; return
+    fi
+  done
+
+  # An explicit remote NAME: the first bare word after `push` that resolves.
+  if [[ $_STRIPPED =~ push[[:space:]]+((-[^[:space:]]+[[:space:]]+)*)([a-zA-Z0-9._-]+) ]]; then
+    name="${BASH_REMATCH[3]}"
+    url=$(git -C "$dir" remote get-url --push "$name" 2>/dev/null)
+    [[ -n $url ]] && { _PUSH_URLS="$url"; return; }
+  fi
+
+  # The current branch's upstream remote.
+  name=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)
+  name=${name%%/*}
+  if [[ -n $name ]]; then
+    url=$(git -C "$dir" remote get-url --push "$name" 2>/dev/null)
+    [[ -n $url ]] && { _PUSH_URLS="$url"; return; }
+  fi
+
+  # Fall back to every push remote: a bare push could reach any of them.
+  _PUSH_URLS=$(git -C "$dir" remote -v 2>/dev/null | awk '$3=="(push)"{print $2}' | sort -u)
+}
+
+# all_whitelisted <urls>: 0 iff every non-empty line is whitelisted. No URLs
+# at all -> 1 (fail closed: we could not establish the destination).
+all_whitelisted() {
+  local urls="$1" url n=0
+  [[ -z $urls ]] && return 1
+  while IFS= read -r url; do
+    url=${url%$'\r'}
+    [[ -z $url ]] && continue
+    n=$((n+1))
+    is_whitelisted_url "$url" || return 1
+  done <<< "$urls"
+  [[ $n -eq 0 ]] && return 1
+  return 0
 }
 
 # ensure_hook <target_dir> -> echo a verdict for self-heal:
@@ -123,21 +208,51 @@ main() {
       exit 2
     fi
     # ── Belt 2: --no-verify / -n skips git hooks, defeating the real judge ──
-    _strip_quotes "$cmd"
-    if [[ $_STRIPPED =~ (^|[[:space:]])(--no-verify|-n)([[:space:]]|=|$) ]]; then
+    # Judge flags on the COMMAND only: heredoc bodies are data (a commit
+    # message may legitimately discuss these flags), and quoted strings
+    # likewise.
+    _strip_heredocs "$cmd"
+    _strip_quotes "$_STRIPPED_HD"
+    # `-n` must be an argument to git commit/push, not the shell's string-test
+    # operator: `if [ -n "$x" ]; then git commit ...` is ordinary scripting and
+    # was being blocked. Require -n to follow `git [opts] commit|push`.
+    if [[ $_STRIPPED =~ (^|[[:space:]])--no-verify([[:space:]]|=|$) ]] \
+       || [[ $_STRIPPED =~ git([[:space:]]+-[^[:space:]]+)*[[:space:]]+(commit|push)([[:space:]]+[^[:space:]]+)*[[:space:]]+-n([[:space:]]|$) ]]; then
       echo "BLOCKED: --no-verify / -n is not allowed on commit/push — it bypasses the git-guard hook that judges the destination. Run it manually if you truly intend to skip the guard." >&2
       exit 2
     fi
-    # ── Self-heal the target repo, then defer to its git hook ──
     resolve_target "$cmd" "$cwd"
     [[ -z $_TARGET ]] && { echo "BLOCKED: could not determine target directory for git command." >&2; exit 2; }
+
+    # ── Belt 3: DESTINATION. This is the rule that binds Claude and only
+    # Claude — the user is trusted to push wherever they like. It lives here,
+    # not in the per-repo git hook, because a git hook fires for everyone and
+    # cannot tell who invoked it (and no env var can establish that either:
+    # Claude could clear any flag for a child process it spawns). This hook is
+    # a separate execution path that only ever runs for Claude, so there is
+    # nothing here for Claude to unset. ──
+    resolve_push_urls "$_TARGET" "$cmd"
+    if ! all_whitelisted "$_PUSH_URLS"; then
+      echo "BLOCKED: this would commit/push to a repo that is not ours." >&2
+      if [[ -n $_PUSH_URLS ]]; then
+        echo "Destination:" >&2
+        printf '  %s\n' $_PUSH_URLS >&2
+      else
+        echo "Destination could not be determined (no push remote resolved)." >&2
+      fi
+      echo "Allowed: github.com, dev.azure.com/evolx/ (incl. ssh form)." >&2
+      echo "If this is a customer repo the block is intended — run it yourself in a terminal." >&2
+      exit 2
+    fi
+
+    # ── Self-heal the target repo, then defer to its git hook for CONTENT ──
     local verdict; verdict=$(ensure_hook "$_TARGET")
     case "$verdict" in
       foreign)
-        echo "BLOCKED: $_TARGET/.git/hooks already has a non-git-guard pre-commit/pre-push hook. Refusing to overwrite it. Install git-guard manually (chain it) or run the command yourself." >&2
+        echo "BLOCKED: $_TARGET/.git/hooks already has a non-git-guard hook. Refusing to overwrite it. Install git-guard manually (chain it) or run the command yourself." >&2
         exit 2 ;;
     esac
-    exit 0   # armed (or deferred): the git hook now does the real judging
+    exit 0   # destination is ours; the git hook now judges CONTENT
   fi
 
   # ── Belt 3: remote mutation. add/set-url to a whitelisted URL is the benign
