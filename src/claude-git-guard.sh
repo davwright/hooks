@@ -15,6 +15,11 @@
 #      hook installed. Missing/stale -> install the stub. Foreign hook present
 #      -> block+warn (don't clobber). Then let the command through; the git
 #      hook does the real judging.
+#   3. The user's checkout in a repo that is NOT ours (same whitelist): no
+#      branch create/switch, stash, whole-tree add, reset --hard, clean -f or
+#      worktree add. A checkout of the remote's DEFAULT branch there is a
+#      read-only mirror: no Edit/Write into it, no git add. Registered for
+#      Bash, PowerShell and the file-edit tools.
 #
 # Everything else exits 0 fast. Pure-bash matching (no grep/sed forks) on the
 # hot path, since this fires on EVERY Bash command.
@@ -45,15 +50,17 @@ _strip_heredocs() {
   _STRIPPED_HD="$out"
 }
 
+# With a 2nd arg, each quoted string leaves that token behind instead of
+# vanishing, so it still counts as one argument.
 _strip_quotes() {
-  local s="$1" out="" i ch q=""
+  local s="$1" mark="${2:-}" out="" i ch q=""
   for (( i=0; i<${#s}; i++ )); do
     ch=${s:i:1}
     if [[ -n $q ]]; then
       [[ $ch == "$q" ]] && q=""
       continue
     fi
-    if [[ $ch == "'" || $ch == '"' ]]; then q=$ch; continue; fi
+    if [[ $ch == "'" || $ch == '"' ]]; then q=$ch; out+=$mark; continue; fi
     out+=$ch
   done
   _STRIPPED="$out"
@@ -137,7 +144,120 @@ resolve_push_urls() {
   fi
 
   # Fall back to every push remote: a bare push could reach any of them.
-  _PUSH_URLS=$(git -C "$dir" remote -v 2>/dev/null | awk '$3=="(push)"{print $2}' | sort -u)
+  push_remote_urls "$dir"
+}
+
+# push_remote_urls <dir> -> $_PUSH_URLS: every configured push URL, de-duplicated.
+push_remote_urls() {
+  _PUSH_URLS=$(git -C "$1" remote -v 2>/dev/null | awk '$3=="(push)"{print $2}' | sort -u)
+}
+
+# is_foreign <urls>: 0 iff the repo is NOT ours — it has push remotes and not
+# all of them are whitelisted. The same classification the destination rule
+# and the content judge use. A remote-less repo is not foreign.
+is_foreign() {
+  [[ -n $1 ]] && ! all_whitelisted "$1"
+}
+
+# judge_mirror <dir> <urls> <what>: in a repo that is not ours, a checkout of
+# the remote's DEFAULT branch is a read-only mirror of it — work happens in the
+# user's worktrees on their own branches. Exits 2 on a block, returns otherwise.
+# Fails closed when no remote records its default branch.
+judge_mirror() {
+  local dir="$1" urls="$2" what="$3" branch r head known=0
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || return 0   # detached
+  [[ -n $branch ]] || return 0
+  for r in $(git -C "$dir" remote 2>/dev/null); do
+    r=${r%$'\r'}
+    head=$(git -C "$dir" symbolic-ref -q --short "refs/remotes/$r/HEAD" 2>/dev/null) || continue
+    [[ -n $head ]] || continue
+    known=1
+    if [[ $head == "$r/$branch" ]]; then
+      echo "BLOCKED: $what — this checkout is on $head, the default branch of a repo that is not ours ($(echo $urls | sed 's/ /, /g')). It is a read-only mirror." >&2
+      echo "Make the change in a worktree on its own branch." >&2
+      exit 2
+    fi
+  done
+  if [[ $known -eq 0 ]]; then
+    echo "BLOCKED: $what — cannot tell whether branch '$branch' is the remote's default branch (no refs/remotes/<remote>/HEAD) in a repo that is not ours." >&2
+    echo "Ask the user to run: git -C \"$dir\" remote set-head origin --auto" >&2
+    exit 2
+  fi
+}
+
+# judge_file_edit <path>: the Edit/Write/MultiEdit/NotebookEdit rule.
+judge_file_edit() {
+  local dir="${1//\\//}"
+  # A Write may create new directories: judge the nearest existing one.
+  while :; do
+    dir=$(dirname "$dir")
+    [[ -d $dir ]] && break
+    [[ $dir == "." || $dir == "/" || $dir =~ ^[A-Za-z]:/?$ ]] && exit 0
+  done
+  push_remote_urls "$dir"
+  is_foreign "$_PUSH_URLS" || exit 0
+  judge_mirror "$dir" "$_PUSH_URLS" "$1"
+  exit 0
+}
+
+# `git [global opts] <verb> <rest-of-segment>`. Only global options may sit
+# between git and the verb (so `git log --grep stash` is not a stash); the rest
+# runs to the next shell separator. Keep in sync with VerbRe in Program.cs.
+_VERB_RE='(^|[^[:alnum:]_/\\])git(([[:blank:]]+-[Cc][[:blank:]]+[^[:blank:];&|]+)|([[:blank:]]+--?[[:alpha:]][^[:blank:];&|]*))*[[:blank:]]+(checkout|switch|branch|stash|add|reset|clean|worktree)(([[:blank:]][^;&|]*)?)([;&|]|$)'
+
+_short_has() { [[ $1 == -[!-]* && $1 == *"$2"* ]]; }
+
+# verb_reason <verb> <tokens...> -> $_REASON (empty = not a write we police,
+# except a plain add, which the mirror rule still judges).
+verb_reason() {
+  local verb="$1" x; shift
+  _REASON=""
+  case "$verb" in
+    checkout)
+      for x in "$@"; do [[ $x == -b || $x == -B || $x == --orphan ]] && { _REASON="git checkout -b creates a branch"; return; }; done
+      for x in "$@"; do [[ $x == -- ]] && return; done   # restoring named paths
+      for x in "$@"; do [[ $x != -* ]] && { _REASON="git checkout <branch> switches the checkout's branch"; return; }; done ;;
+    switch) _REASON="git switch changes the checkout's branch" ;;
+    branch)
+      [[ $# -eq 0 ]] && return
+      [[ $1 != -* ]] && { _REASON="git branch <name> creates a branch"; return; }
+      for x in "$@"; do
+        case "$x" in -d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--unset-upstream|--set-upstream-to*)
+          _REASON="git branch $x rewrites branches"; return ;;
+        esac
+      done ;;
+    stash) [[ ${1:-} == list || ${1:-} == show ]] || _REASON="git stash moves the user's uncommitted work" ;;
+    add)
+      for x in "$@"; do
+        case "$x" in .|./|:/|--all|--update|--no-ignore-removal) _REASON="git add -A / -u / . stages the whole tree (stage named files only)"; return ;; esac
+        if _short_has "$x" A || _short_has "$x" u; then _REASON="git add -A / -u / . stages the whole tree (stage named files only)"; return; fi
+      done ;;
+    reset) for x in "$@"; do [[ $x == --hard ]] && { _REASON="git reset --hard discards the user's work"; return; }; done ;;
+    clean) for x in "$@"; do if [[ $x == --force ]] || _short_has "$x" f; then _REASON="git clean -f deletes untracked files"; return; fi; done ;;
+    worktree) [[ ${1:-} == add ]] && _REASON="git worktree add creates a checkout" ;;
+  esac
+}
+
+# policed_verbs <cmd> -> $_VERB_BLOCK (first reason, or empty); $_VERB_HIT=1 if
+# anything matched, a plain `git add <path>` included (the mirror rule judges it).
+policed_verbs() {
+  local line rest verb toks
+  _VERB_BLOCK=""; _VERB_HIT=0
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    while [[ $line =~ $_VERB_RE ]]; do
+      verb="${BASH_REMATCH[5]}"
+      rest="${BASH_REMATCH[6]}"
+      line=" ${line#*"${BASH_REMATCH[0]}"}"
+      read -ra toks <<< "$rest"
+      verb_reason "$verb" "${toks[@]}"
+      if [[ -n $_REASON ]]; then
+        _VERB_HIT=1; [[ -z $_VERB_BLOCK ]] && _VERB_BLOCK="$_REASON"
+      elif [[ $verb == add ]]; then
+        _VERB_HIT=1
+      fi
+    done
+  done <<< "$1"
 }
 
 # all_whitelisted <urls>: 0 iff every non-empty line is whitelisted. No URLs
@@ -191,7 +311,7 @@ ensure_hook() {
 main() {
   local input
   input=$(cat)
-  case "$input" in *git*) ;; *) exit 0 ;; esac   # fast bail: no git, no work
+  case "$input" in *git*|*'"file_path"'*|*'"notebook_path"'*) ;; *) exit 0 ;; esac   # fast bail: no git, no file tool, no work
 
   export PATH="$PATH:/c/Users/$USER/bin:/c/ProgramData/chocolatey/bin:/c/Users/$USER/AppData/Local/Microsoft/WinGet/Links"
   command -v jq &>/dev/null || { echo "BLOCKED: jq not found — hook cannot parse input." >&2; exit 2; }
@@ -199,6 +319,10 @@ main() {
   local cmd cwd
   cmd=$(printf '%s' "$input" | jq -r '.tool_input.command') || { echo "BLOCKED: failed to parse hook input." >&2; exit 2; }
   cwd=$(printf '%s' "$input" | jq -r '.cwd // empty')
+  local file
+  file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
+  # ── File-edit tools (Edit/Write/MultiEdit/NotebookEdit) ──
+  [[ -n $file ]] && judge_file_edit "$file"
   [[ -z $cmd || $cmd == null ]] && { echo "BLOCKED: could not extract command from hook input." >&2; exit 2; }
 
   # ── Belt 1: redirect on a commit/push (bypasses the per-repo git hook) ──
@@ -287,6 +411,25 @@ main() {
      || [[ $cmd =~ ${_GIT}config[[:space:]]+([^[:space:]]+[[:space:]]+)*remote\.[^[:space:]]+\.(url|pushurl|fetch|push|mirror)[[:space:]]+[^[:space:]] ]]; then
     echo "BLOCKED: git config of remote.* is not allowed (back-door equivalent of remote set-url). Run manually if intended." >&2
     exit 2
+  fi
+
+  # ── Belt 5: working-tree writes in a repo that is not ours ──
+  # Quoted strings are data (a message, a JSON payload), not commands.
+  _strip_heredocs "$cmd"
+  _strip_quotes "$_STRIPPED_HD" Q
+  policed_verbs "$_STRIPPED"
+  if [[ $_VERB_HIT -eq 1 ]]; then
+    resolve_target "$cmd" "$cwd"
+    [[ -z $_TARGET ]] && { echo "BLOCKED: could not determine target directory for git command." >&2; exit 2; }
+    push_remote_urls "$_TARGET"
+    is_foreign "$_PUSH_URLS" || exit 0
+    if [[ -n $_VERB_BLOCK ]]; then
+      echo "BLOCKED: $_VERB_BLOCK, in a repo that is not ours ($(echo $_PUSH_URLS | sed 's/ /, /g'))." >&2
+      echo "That checkout is the user's: hand them the command instead of running it." >&2
+      exit 2
+    fi
+    # Only plain `git add <path>` is left: allowed unless this is the mirror.
+    judge_mirror "$_TARGET" "$_PUSH_URLS" "git add in $_TARGET"
   fi
 
   exit 0   # not a git write we police — let it through

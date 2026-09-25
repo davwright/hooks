@@ -201,6 +201,27 @@ phrase 'Co-authored-by: claude'                     1
 phrase 'Coauthored-by: Claude'                      1
 phrase 'Generated with Claude Code'                 1
 
+echo "== CONTENT: private Pulse ids in commit messages =="
+phrase 'Fix the thing (PS-1009)'          1
+phrase 'refs ps-12'                       1
+phrase 'see pulse123 for details'         1
+phrase 'PS-1'                             1
+phrase 'Pulse 12 was discussed'           0
+phrase 'ups-12 is a part number'          0
+phrase 'use PS-style prompts'             0
+phrase 'impulse123'                       0
+# The id rule is for messages: a diff line mentioning one is not blocked.
+dirty 'label PS-1009 in code' 0
+# Own repos are never scanned, ids included.
+OWNID=$(mkrepo ownid 'https://github.com/me/x.git')
+check 0 "$(run_msg "$OWNID" 'Fix (PS-1009)')" 'own repo: Pulse id in message allowed'
+PPID_REPO=$(mkrepo ppid 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c')
+PB=$(seed "$PPID_REPO" f.txt 'a' 'clean one')
+PT=$(seed "$PPID_REPO" f.txt 'a
+b' 'Fix the form (PS-1009)')
+check_content 1 "$(run_push "$PPID_REPO" 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c' \
+  "refs/heads/main $PT refs/heads/main $PB")" 'push: Pulse id in a pushed message BLOCKED'
+
 echo "== commit-msg: scope and mechanics =="
 # Own repo -> message never scanned, even a dirty one.
 OWNMSG=$(mkrepo ownmsg 'https://github.com/me/x.git')

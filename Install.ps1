@@ -10,7 +10,7 @@
          so every future `git init` / `git clone` is armed automatically.
       3. The thin Claude hook -> ~\.claude\hooks\claude-git-guard.{exe|sh}
                                  + registers it in ~\.claude\settings.json under
-                                 PreToolUse:Bash, REPLACING any older entry
+                                 PreToolUse for Bash, PowerShell and Edit/Write/MultiEdit/NotebookEdit, REPLACING any older entry
                                  (block-git-write.sh / the other impl) — no
                                  protection gap, no duplicate.
 
@@ -141,27 +141,27 @@ if (-not ($settings.PSObject.Properties.Name -contains 'hooks')) {
 if (-not ($settings.hooks.PSObject.Properties.Name -contains 'PreToolUse')) {
     Add-Member -InputObject $settings.hooks -MemberType NoteProperty -Name 'PreToolUse' -Value @() -Force
 }
-$preList   = @($settings.hooks.PreToolUse)
-$bashEntry = $preList | Where-Object { $_.matcher -eq 'Bash' } | Select-Object -First 1
-
-if (-not $bashEntry) {
-    $bashEntry = [pscustomobject]@{ matcher = 'Bash'; hooks = @() }
-    $preList += $bashEntry
-    $settings.hooks.PreToolUse = $preList
+# The guard judges shell commands (Bash, PowerShell) and file edits (the
+# read-only-mirror rule). Strip every git-guard command from EVERY entry —
+# other matchers may already list it — then register it once, in its own
+# entry. Every other hook is preserved; an entry left empty is dropped.
+$Matcher = 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit'
+$GuardCmds = @($OldCmds) + $NewCmd
+$preList = @()
+foreach ($e in @($settings.hooks.PreToolUse)) {
+    $kept = @($e.hooks | Where-Object { $GuardCmds -notcontains $_.command })
+    if ($kept.Count -eq 0) { continue }
+    $e.hooks = $kept
+    $preList += $e
 }
+$preList += [pscustomobject]@{ matcher = $Matcher; hooks = @([pscustomobject]@{ type = 'command'; command = $NewCmd; timeout = 10 }) }
+$settings.hooks.PreToolUse = $preList
 
-# Rebuild the Bash hooks list: drop any old/sibling git-guard entry, ensure the
-# new one is present exactly once. Preserve every other hook (python, ev, ...).
-$kept = @($bashEntry.hooks | Where-Object {
-    ($OldCmds -notcontains $_.command) -and ($_.command -ne $NewCmd)
-})
-$newEntry = [pscustomobject]@{ type = 'command'; command = $NewCmd; timeout = 10 }
-$bashEntry.hooks = @($kept) + $newEntry
-
-if ($PSCmdlet.ShouldProcess($SettingsPath, "Register $NewCmd in PreToolUse:Bash")) {
+if ($PSCmdlet.ShouldProcess($SettingsPath, "Register $NewCmd in PreToolUse:$Matcher")) {
     $json = $settings | ConvertTo-Json -Depth 20
-    Set-Content -LiteralPath $SettingsPath -Value $json -Encoding UTF8
-    Write-Host "  registered $NewCmd (removed any older git-guard entry)" -ForegroundColor Green
+    # No BOM: Set-Content -Encoding UTF8 in PowerShell 5.1 writes one.
+    [IO.File]::WriteAllText($SettingsPath, $json, (New-Object Text.UTF8Encoding $false))
+    Write-Host "  registered $NewCmd for $Matcher (removed any older git-guard entry)" -ForegroundColor Green
 }
 
 Write-Host ''

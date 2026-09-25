@@ -92,14 +92,23 @@ claude-git-guard  (Claude PreToolUse hook — THIN)
    • blocks GIT_DIR= / --git-dir redirects, remote re-pointing, config remote.*
    • allows `remote add <whitelisted-url>`   ← fresh-init flow
    • installs the guard into the target repo if missing (self-heal); else blocks
+   • in a repo that is NOT ours (same whitelist): blocks branch create/switch,
+     stash, add -A / . / -u, reset --hard, clean -f, worktree add
+   • there, a checkout of the remote's default branch is a read-only mirror:
+     blocks Edit/Write/MultiEdit/NotebookEdit into it and any git add
    • otherwise gets out of the way
    │
    ▼
 .git/hooks/pre-commit & pre-push  →  git-guard.sh  (per-repo — the REAL judge)
    • pre-push:   whitelist-checks the destination URL git hands it directly
    • pre-commit: whitelist-checks the repo's configured push remote
+   • commit-msg / pre-push: in a repo that is not ours, also refuses private
+     Pulse ids (PS-<n>, pulse<n>) in commit messages
    • refuses (non-zero) → git aborts the operation
 ```
+
+The Claude hook is registered for the Bash, PowerShell and file-edit tools
+(`Install.ps1` does this).
 
 The git layer is handed **exact, unobfuscated arguments by git itself** — no
 string guessing.
@@ -163,6 +172,10 @@ All green = the two implementations behave identically.
   (the template arms it). Git deliberately never runs a cloned repo's committed
   hooks, so a machine-global template is the only way to arm fresh clones with no
   manual step.
+- **The whitelist has two classes: ours and not ours.** A shared repo of ours
+  (colleagues on its `main`) is "ours", so the branch/stash/mirror rules and
+  the Pulse-id rule don't apply there. File writes made through shell commands
+  (not the Edit/Write tools) are not judged by the mirror rule.
 - **The whitelist lives in two synced places**: `src/git-guard.sh` (the judge)
   and a small mirror in `src/claude-git-guard.sh` (only for the `remote add`
   exception). Keep them in step.

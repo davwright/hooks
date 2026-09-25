@@ -35,7 +35,7 @@
 # `--no-verify` commit/push. For Claude that hole is closed one layer up, in
 # the PreToolUse hook. A human using --no-verify is doing so deliberately.
 
-GUARD_VERSION=2
+GUARD_VERSION=3
 
 # ── Own infrastructure ─────────────────────────────────────────────────────
 # Matched case-insensitively against push URLs. A repo whose push remotes are
@@ -63,6 +63,14 @@ AI_WORDS=(
 AI_PHRASES=(
   'co-?authored[-[:space:]]*by:?[[:space:]]*claude'
   'generated[[:space:]]+with[[:space:]]+claude'
+)
+
+# Private task-tracker ids (the user's Pulse): commit MESSAGES only, since a
+# customer repo's history must not point at a tracker nobody there can read.
+# Word-bounded and case-insensitive like AI_WORDS.
+PULSE_IDS=(
+  'ps-[0-9]+'
+  'pulse[0-9]+'
 )
 
 # ── self-update against the LOCAL canonical ────────────────────────────────
@@ -142,11 +150,26 @@ scan_text() {
   [[ $hits -eq 0 ]]
 }
 
+# scan_message <label> <text>: scan_text, plus the private Pulse ids.
+scan_message() {
+  local label="$1" text="$2" hits=0 p lc
+  scan_text "$label" "$text" || hits=1
+  lc=${text,,}
+  for p in "${PULSE_IDS[@]}"; do
+    if [[ $lc =~ (^|[^a-z0-9])($p)([^a-z0-9]|$) ]]; then
+      echo "  $label: contains '${BASH_REMATCH[2]}' (a private Pulse id)" >&2
+      hits=1
+    fi
+  done
+  [[ $hits -eq 0 ]]
+}
+
 report_and_die() {
-  echo "git-guard: BLOCKED — AI-tool reference in $1." >&2
+  echo "git-guard: BLOCKED — AI-tool reference or private Pulse id in $1." >&2
   echo "This repo's push remote is not github/evolx, so AI-tool references must" >&2
   echo "not enter its history. Blacklisted (word-bounded, case-insensitive):" >&2
   echo "  ${AI_WORDS[*]}" >&2
+  echo "  and Pulse ids (PS-<n>, pulse<n>) in commit messages" >&2
   echo "Reword and retry." >&2
   exit 1
 }
@@ -215,7 +238,7 @@ case "$mode" in
     # which contains the whole diff and would double-report it).
     msg=$(sed '/^# ------------------------ >8 ------------------------$/,$d' "$msg_path" \
           | grep -v '^#')
-    scan_text "commit message" "$msg" || report_and_die "the commit message"
+    scan_message "commit message" "$msg" || report_and_die "the commit message"
     exit 0
     ;;
   pre-push)
@@ -237,7 +260,7 @@ case "$mode" in
       while read -r sha; do
         [[ -z $sha ]] && continue
         short=$(git rev-parse --short "$sha" 2>/dev/null)
-        scan_text "commit $short message" "$(git log -1 --format=%B "$sha")" || fail=1
+        scan_message "commit $short message" "$(git log -1 --format=%B "$sha")" || fail=1
         scan_text "commit $short diff" "$(added_lines show "$sha" --format=)" || fail=1
       done <<< "$range"
     done

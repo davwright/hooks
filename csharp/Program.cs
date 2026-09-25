@@ -13,6 +13,11 @@
 //         non-whitelisted URL, git config remote.* writes).
 //   3. Self-heal: before commit|push, install our git-hook stub into the target
 //      repo (or block if a foreign hook is present).
+//   4. The user's checkout in a repo that is NOT ours (classified by the same
+//      whitelist): no branch create/switch, stash, whole-tree add, reset
+//      --hard, clean -f or worktree add. A checkout of the remote's DEFAULT
+//      branch there is a read-only mirror: no Edit/Write into it, no git add.
+//      Registered for Bash, PowerShell and the file-edit tools.
 // The per-repo git hook (git-guard.sh) owns the CONTENT rule instead: no
 // AI-tool words in a customer repo's history, enforced for everyone.
 // Logic is a faithful port of the bash version — the same test suite must pass
@@ -54,24 +59,32 @@ internal static partial class Program
     {
         string input = Console.In.ReadToEnd();
 
-        // Fast bail: no "git" substring anywhere -> no work. Mirrors the bash
-        // `case "$input" in *git*) ;; *) exit 0` on the raw JSON.
-        if (!input.Contains("git", StringComparison.Ordinal))
+        // Fast bail: no "git" substring and no file-tool path -> no work.
+        // Mirrors the bash `case "$input" in ...` on the raw JSON.
+        if (!input.Contains("git", StringComparison.Ordinal)
+            && !input.Contains("\"file_path\"", StringComparison.Ordinal)
+            && !input.Contains("\"notebook_path\"", StringComparison.Ordinal))
             return 0;
 
         string cmd;
         string cwd;
+        string file;
         try
         {
             var hook = JsonSerializer.Deserialize(input, HookJson.Default.HookInput);
             cmd = hook?.ToolInput?.Command ?? "";
             cwd = hook?.Cwd ?? "";
+            file = hook?.ToolInput?.FilePath ?? hook?.ToolInput?.NotebookPath ?? "";
         }
         catch (JsonException)
         {
             Console.Error.WriteLine("BLOCKED: failed to parse hook input.");
             return 2;
         }
+
+        // ── File-edit tools (Edit/Write/MultiEdit/NotebookEdit) ──
+        if (file.Length > 0)
+            return JudgeFileEdit(file);
 
         if (string.IsNullOrEmpty(cmd) || cmd == "null")
         {
@@ -165,7 +178,136 @@ internal static partial class Program
             return 2;
         }
 
+        // ── Belt 5: working-tree writes in a repo that is not ours ──
+        // Quoted strings are data (a message, a JSON payload), not commands.
+        var hits = PolicedVerbs(StripQuotes(StripHeredocs(cmd), "Q"));
+        if (hits.Count > 0)
+        {
+            string target = ResolveTarget(cmd, cwd);
+            if (string.IsNullOrEmpty(target))
+            {
+                Console.Error.WriteLine("BLOCKED: could not determine target directory for git command.");
+                return 2;
+            }
+            var urls = PushRemoteUrls(target);
+            if (!IsForeign(urls)) return 0;
+
+            foreach (var reason in hits)
+            {
+                if (reason is null) continue;
+                Console.Error.WriteLine($"BLOCKED: {reason}, in a repo that is not ours ({string.Join(", ", urls)}).");
+                Console.Error.WriteLine("That checkout is the user's: hand them the command instead of running it.");
+                return 2;
+            }
+            // Only plain `git add <path>` is left: allowed unless this is the mirror.
+            return JudgeMirror(target, urls, $"git add in {target}");
+        }
+
         return 0; // not a git write we police — let it through
+    }
+
+    // A repo is NOT ours when it has push remotes and not all of them are
+    // whitelisted — the same classification the destination rule and the
+    // content judge use. A remote-less repo is not foreign: nothing in it
+    // belongs to anyone else yet.
+    static bool IsForeign(List<string> urls) => urls.Count > 0 && !AllWhitelisted(urls);
+
+    static int JudgeFileEdit(string file)
+    {
+        string dir = ToWindowsPath(file).Replace('/', '\\');
+        // A Write may create new directories: judge the nearest existing one.
+        do { dir = Path.GetDirectoryName(dir) ?? ""; } while (dir.Length > 0 && !Directory.Exists(dir));
+        if (dir.Length == 0) return 0;
+        var urls = PushRemoteUrls(dir);
+        if (!IsForeign(urls)) return 0;
+        return JudgeMirror(dir, urls, file);
+    }
+
+    // In a repo that is not ours, a checkout of the remote's DEFAULT branch is
+    // a read-only mirror of it: work happens in the user's worktrees on their
+    // own branches. Fail closed when no remote records its default branch.
+    static int JudgeMirror(string dir, List<string> urls, string what)
+    {
+        string? branch = Git(dir, "symbolic-ref", "-q", "--short", "HEAD");
+        if (branch is null) return 0; // detached: not a checkout of the default branch
+        string? remotes = Git(dir, "remote");
+        var known = new List<string>();
+        foreach (var r in (remotes ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string? head = Git(dir, "symbolic-ref", "-q", "--short", $"refs/remotes/{r}/HEAD");
+            if (head is null) continue;
+            known.Add(r);
+            if (head == $"{r}/{branch}")
+            {
+                Console.Error.WriteLine($"BLOCKED: {what} — this checkout is on {head}, the default branch of a repo that is not ours ({string.Join(", ", urls)}). It is a read-only mirror.");
+                Console.Error.WriteLine("Make the change in a worktree on its own branch.");
+                return 2;
+            }
+        }
+        if (known.Count == 0)
+        {
+            Console.Error.WriteLine($"BLOCKED: {what} — cannot tell whether branch '{branch}' is the remote's default branch (no refs/remotes/<remote>/HEAD) in a repo that is not ours.");
+            Console.Error.WriteLine($"Ask the user to run: git -C \"{dir}\" remote set-head origin --auto");
+            return 2;
+        }
+        return 0;
+    }
+
+    // Every `git <verb>` in the command that writes the working tree or its
+    // refs. A reason means "blocked in a repo that is not ours"; a null entry
+    // is a plain `git add <path>`, allowed there except in the read-only mirror.
+    static List<string?> PolicedVerbs(string cmd)
+    {
+        var hits = new List<string?>();
+        foreach (var line in cmd.Split('\n'))
+        {
+            foreach (Match m in VerbRe().Matches(line.TrimEnd('\r')))
+            {
+                string verb = m.Groups["verb"].Value;
+                var t = m.Groups["rest"].Value
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).ToList();
+                string? reason = VerbReason(verb, t);
+                if (reason is not null || verb == "add")
+                    hits.Add(reason);
+            }
+        }
+        return hits;
+    }
+
+    static bool ShortFlagHas(string tok, char c) =>
+        tok.Length > 1 && tok[0] == '-' && tok[1] != '-' && tok.Contains(c);
+
+    // null = not a write we police (except a plain add, see PolicedVerbs).
+    static string? VerbReason(string verb, List<string> t)
+    {
+        switch (verb)
+        {
+            case "checkout":
+                if (t.Any(x => x is "-b" or "-B" or "--orphan")) return "git checkout -b creates a branch";
+                if (t.Contains("--")) return null; // restoring named paths
+                return t.Any(x => !x.StartsWith('-')) ? "git checkout <branch> switches the checkout's branch" : null;
+            case "switch":
+                return "git switch changes the checkout's branch";
+            case "branch":
+                if (t.Count == 0) return null;
+                if (!t[0].StartsWith('-')) return "git branch <name> creates a branch";
+                string? bad = t.FirstOrDefault(x => x is "-d" or "-D" or "--delete" or "-m" or "-M" or "--move" or "-c" or "-C" or "--copy"
+                                  or "-f" or "--force" or "-u" or "--unset-upstream" || x.StartsWith("--set-upstream-to"));
+                return bad is null ? null : $"git branch {bad} rewrites branches";
+            case "stash":
+                return t.Count > 0 && t[0] is "list" or "show" ? null : "git stash moves the user's uncommitted work";
+            case "add":
+                return t.Any(x => x is "." or "./" or ":/" or "--all" or "--update" or "--no-ignore-removal"
+                                  || ShortFlagHas(x, 'A') || ShortFlagHas(x, 'u'))
+                    ? "git add -A / -u / . stages the whole tree (stage named files only)" : null;
+            case "reset":
+                return t.Contains("--hard") ? "git reset --hard discards the user's work" : null;
+            case "clean":
+                return t.Any(x => x == "--force" || ShortFlagHas(x, 'f')) ? "git clean -f deletes untracked files" : null;
+            case "worktree":
+                return t.Count > 0 && t[0] == "add" ? "git worktree add creates a checkout" : null;
+        }
+        return null;
     }
 
     // _strip_quotes: char-by-char removal of single/double quoted substrings,
@@ -193,7 +335,9 @@ internal static partial class Program
         return sb.ToString();
     }
 
-    static string StripQuotes(string s)
+    // With a mark, each quoted string leaves that token behind instead of
+    // vanishing, so it still counts as one argument.
+    static string StripQuotes(string s, string mark = "")
     {
         var sb = new StringBuilder(s.Length);
         char q = '\0';
@@ -204,7 +348,7 @@ internal static partial class Program
                 if (ch == q) q = '\0';
                 continue;
             }
-            if (ch is '\'' or '"') { q = ch; continue; }
+            if (ch is '\'' or '"') { q = ch; sb.Append(mark); continue; }
             sb.Append(ch);
         }
         return sb.ToString();
@@ -381,6 +525,13 @@ internal static partial class Program
         }
 
         // Fall back to every push remote.
+        return PushRemoteUrls(dir);
+    }
+
+    // Every configured push URL of the repo at <dir>, de-duplicated.
+    static List<string> PushRemoteUrls(string dir)
+    {
+        var urls = new List<string>();
         var all = Git(dir, "remote", "-v");
         if (all is not null)
         {
@@ -427,6 +578,12 @@ internal static partial class Program
 
     [GeneratedRegex(GitPrefix + @"(commit|push)([^a-zA-Z0-9_]|$)")]
     private static partial Regex CommitPushRe();
+
+    // `git [global opts] <verb> <rest-of-segment>`. Only global options may sit
+    // between git and the verb (so `git log --grep stash` is not a stash);
+    // the rest runs to the next shell separator. Keep in sync with _VERB_RE.
+    [GeneratedRegex("""(?<![a-zA-Z0-9_/\\])git(([ \t]+-[Cc][ \t]+[^ \t;&|]+)|([ \t]+--?[a-zA-Z][^ \t;&|]*))*[ \t]+(?<verb>checkout|switch|branch|stash|add|reset|clean|worktree)(?<rest>([ \t][^;&|]*)?)(?=[;&|]|$)""")]
+    private static partial Regex VerbRe();
 
     [GeneratedRegex(GitPrefix + @"remote\s+(add|remove|rm|rename|set-url|set-branches|set-head|prune)([^a-zA-Z0-9_]|$)")]
     private static partial Regex RemoteMutationRe();
@@ -493,6 +650,8 @@ internal sealed class HookInput
 internal sealed class ToolInput
 {
     [JsonPropertyName("command")] public string? Command { get; set; }
+    [JsonPropertyName("file_path")] public string? FilePath { get; set; }
+    [JsonPropertyName("notebook_path")] public string? NotebookPath { get; set; }
 }
 
 [JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]

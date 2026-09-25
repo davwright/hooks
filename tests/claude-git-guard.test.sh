@@ -141,6 +141,81 @@ else
   FAIL=$((FAIL+1)); printf "  FAIL foreign hook was clobbered\n"
 fi
 
+# Customer checkouts as the user has them: a worktree on its own branch, and a
+# mirror checked out on the remote's default branch. origin/HEAD is what clone
+# records; set it with plumbing (no fetch needed).
+CUST_URL='https://oebb-azure-platform@dev.azure.com/oebb-azure-platform/osis/_git/osis'
+CUST_WT="$TMP/cust_wt"; MIRROR="$TMP/mirror"; NOREMOTE="$TMP/noremote"
+for d in "$CUST_WT" "$MIRROR"; do
+  git init -q "$d"; git -C "$d" remote add origin "$CUST_URL"
+  git -C "$d" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  printf 'x\n' > "$d/f.txt"
+done
+git -C "$CUST_WT" symbolic-ref HEAD refs/heads/fixes
+git -C "$MIRROR"  symbolic-ref HEAD refs/heads/main
+git init -q "$NOREMOTE"
+git -C "$CUST" symbolic-ref HEAD refs/heads/fixes   # customer repo with no origin/HEAD
+
+# check_err <expected> <actual> <label> <stderr-substring>: exit code AND the
+# block came from the rule under test.
+check_err() {
+  if [ "$1" = "$2" ] && grep -q -- "$4" "$TMP/err"; then PASS=$((PASS+1)); printf "  ok   %s\n" "$3"
+  else FAIL=$((FAIL+1)); printf "  FAIL %s (exp=%s got=%s, want '%s') %s\n" "$3" "$1" "$2" "$4" "$(cat "$TMP/err")"; fi
+}
+
+echo "== belt: working-tree writes in a repo that is not ours =="
+for c in 'git checkout -b feat' 'git checkout -B feat' 'git switch main' 'git switch -c feat' \
+         'git checkout main' 'git branch feat' 'git branch -D feat' 'git branch -m a b' \
+         'git stash' 'git stash -u' 'git stash pop' \
+         'git add -A' 'git add .' 'git add --all' 'git add -u' 'git add -Av' \
+         'git reset --hard' 'git reset --hard origin/main' 'git clean -fd' 'git clean -f' 'git clean -xdf' \
+         'git worktree add ../other fixes2' \
+         'git status && git stash' 'git add f.txt;git stash' 'if [ -n "$x" ]; then git stash; fi'; do
+  check_err 2 "$(run "$CUST_WT" "$c")" "customer worktree: $c BLOCKED" 'in a repo that is not ours'
+done
+for c in 'git checkout -- f.txt' 'git checkout' 'git branch' 'git branch -vv' 'git branch --show-current' \
+         'git stash list' 'git stash show' 'git add f.txt' 'git add "f.txt"' 'git reset HEAD f.txt' \
+         'git clean -n' 'git worktree list' 'git log --grep stash' 'git diff --cached --stat' \
+         'echo "git stash"' "printf '{\"command\":\"git add -A\"}' | cat" 'git log --grep "reset --hard"'; do
+  check 0 "$(run "$CUST_WT" "$c")" "customer worktree: $c allowed"
+done
+# The target is the repo the command names, not the hook's cwd.
+check_err 2 "$(run "$ALLOWED" "git -C $CUST_WT stash")" 'git -C <customer> stash from own cwd BLOCKED' 'not ours'
+check_err 2 "$(run "$ALLOWED" "cd $CUST_WT && git checkout -b x")" 'cd <customer> && checkout -b BLOCKED' 'not ours'
+# PowerShell tool: same JSON shape, PowerShell syntax.
+check_err 2 "$(run "$ALLOWED" "git -C '$CUST_WT' stash; if (\$?) { git status }")" 'PowerShell: git -C quoted stash BLOCKED' 'not ours'
+check 0 "$(run "$ALLOWED" "git -C '$CUST_WT' status; if (\$?) { git log -1 }")" 'PowerShell: read-only chain allowed'
+# Our own repos and remote-less repos are not policed by this belt.
+for c in 'git stash' 'git checkout -b feat' 'git add -A' 'git reset --hard' 'git worktree add ../w'; do
+  check 0 "$(run "$ALLOWED"  "$c")" "own repo: $c allowed"
+  check 0 "$(run "$NOREMOTE" "$c")" "remote-less repo: $c allowed"
+done
+
+echo "== read-only mirror: default-branch checkout of a repo that is not ours =="
+run_file() {  # $1=tool $2=key $3=path -> exit code
+  printf '{"cwd":%s,"tool_name":"%s","tool_input":{"%s":%s,"content":"x"}}' \
+    "$(printf %s "$ALLOWED" | jq -Rs .)" "$1" "$2" "$(printf %s "$3" | jq -Rs .)" \
+    | $GUARD_CMD >/dev/null 2>"$TMP/err"; echo $?
+}
+check_err 2 "$(run "$MIRROR" 'git add f.txt')"                 'mirror: git add <path> BLOCKED' 'read-only mirror'
+check_err 2 "$(run_file Edit file_path "$MIRROR/f.txt")"        'mirror: Edit BLOCKED' 'read-only mirror'
+check_err 2 "$(run_file MultiEdit file_path "$MIRROR/f.txt")"   'mirror: MultiEdit BLOCKED' 'read-only mirror'
+check_err 2 "$(run_file Write file_path "$MIRROR/new/dir/g.txt")" 'mirror: Write into a new subdir BLOCKED' 'read-only mirror'
+check_err 2 "$(run_file NotebookEdit notebook_path "$MIRROR/n.ipynb")" 'mirror: NotebookEdit BLOCKED' 'read-only mirror'
+check_err 2 "$(run_file Edit file_path "$(cygpath -w "$MIRROR/f.txt")")" 'mirror: Windows-form path BLOCKED' 'read-only mirror'
+check 0 "$(run_file Edit file_path "$CUST_WT/f.txt")"           'customer worktree on its own branch: Edit allowed'
+check 0 "$(run_file Edit file_path "$ALLOWED/f.txt")"           'own repo: Edit allowed'
+check 0 "$(run_file Write file_path "$NOREMOTE/f.txt")"         'remote-less repo: Write allowed'
+mkdir -p "$TMP/loose"
+check 0 "$(run_file Write file_path "$TMP/loose/f.txt")"        'outside any repo: Write allowed'
+check_err 2 "$(run_file Edit file_path "$CUST/f.txt")"          'customer repo without origin/HEAD: fail closed' 'remote set-head'
+# Detached HEAD is not a checkout of the default branch.
+DETACHED="$TMP/detached"; git init -q "$DETACHED"; git -C "$DETACHED" remote add origin "$CUST_URL"
+git -C "$DETACHED" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$DETACHED" -c user.name=t -c user.email=t@t commit-tree "$(git -C "$DETACHED" mktree </dev/null)" -m s >"$TMP/sha"
+printf '%s\n' "$(cat "$TMP/sha")" > "$DETACHED/.git/HEAD"
+check 0 "$(run_file Edit file_path "$DETACHED/f.txt")"          'customer detached HEAD: Edit allowed'
+
 echo "== read-only git -> allowed =="
 check 0 "$(run "$ALLOWED" 'git status')"      'git status'
 check 0 "$(run "$ALLOWED" 'git log --oneline')" 'git log'
