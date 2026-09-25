@@ -494,8 +494,14 @@ internal static partial class Program
     {
         var urls = new List<string>();
 
+        // Only the push's own arguments can name a destination: a URL elsewhere
+        // on the line (`...; curl https://x`) is not where the push lands, and
+        // a commit takes no destination argument at all.
+        var seg = PushArgsRe().Match(stripped);
+        string pushArgs = seg.Success ? "push" + seg.Groups["args"].Value : "";
+
         // An explicit URL argument is the destination, whatever the remotes say.
-        foreach (var tok in stripped.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var tok in pushArgs.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
         {
             if (tok.Contains("://") || (tok.Contains('@') && tok.Contains(':')))
             {
@@ -505,7 +511,7 @@ internal static partial class Program
         }
 
         // An explicit remote NAME after `push`.
-        var m = PushRemoteNameRe().Match(stripped);
+        var m = PushRemoteNameRe().Match(pushArgs);
         if (m.Success)
         {
             var u = Git(dir, "remote", "get-url", "--push", m.Groups[3].Value);
@@ -611,6 +617,11 @@ internal static partial class Program
 
     [GeneratedRegex("""<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?""")]
     private static partial Regex HeredocRe();
+
+    // `git [tokens] push <args to the next shell separator>`. Keep in sync
+    // with _PUSH_ARGS_RE.
+    [GeneratedRegex(@"(?<![a-zA-Z0-9_/\\])git([ \t]+[^ \t;&|\n]+)*?[ \t]+push(?<args>([ \t][^;&|\n]*)?)(?=[;&|\n]|$)")]
+    private static partial Regex PushArgsRe();
 
     [GeneratedRegex(@"push\s+((-[^\s]+\s+)*)([a-zA-Z0-9._-]+)")]
     private static partial Regex PushRemoteNameRe();

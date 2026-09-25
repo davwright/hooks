@@ -111,6 +111,11 @@ is_whitelisted_url() {
   return 1
 }
 
+# `git [tokens] push <args to the next shell separator>`. Keep in sync with
+# PushArgsRe in Program.cs.
+_NL=$'\n'
+_PUSH_ARGS_RE='(^|[^[:alnum:]_/\\])git([[:blank:]]+[^[:blank:];&|'$_NL']+)*[[:blank:]]+push(([[:blank:]][^;&|'$_NL']*)?)([;&|'$_NL']|$)'
+
 # resolve_push_urls <dir> <cmd> -> $_PUSH_URLS, newline-separated.
 # Asks GIT where a push would land rather than parsing the command string. An
 # explicit URL or remote name on the command line wins; otherwise the current
@@ -120,16 +125,22 @@ resolve_push_urls() {
   local dir="$1" cmd="$2" tok url name
   _PUSH_URLS=""
 
-  # An explicit URL argument is the destination, whatever the remotes say.
+  # Only the push's own arguments can name a destination: a URL elsewhere on
+  # the line (`...; curl https://x`) is not where the push lands, and a commit
+  # takes no destination argument at all.
   _strip_quotes "$cmd"
-  for tok in $_STRIPPED; do
+  local push_args=""
+  [[ $_STRIPPED =~ $_PUSH_ARGS_RE ]] && push_args="push${BASH_REMATCH[3]}"
+
+  # An explicit URL argument is the destination, whatever the remotes say.
+  for tok in $push_args; do
     if [[ $tok == *://* || $tok == *@*:* ]]; then
       _PUSH_URLS="$tok"; return
     fi
   done
 
   # An explicit remote NAME: the first bare word after `push` that resolves.
-  if [[ $_STRIPPED =~ push[[:space:]]+((-[^[:space:]]+[[:space:]]+)*)([a-zA-Z0-9._-]+) ]]; then
+  if [[ $push_args =~ push[[:space:]]+((-[^[:space:]]+[[:space:]]+)*)([a-zA-Z0-9._-]+) ]]; then
     name="${BASH_REMATCH[3]}"
     url=$(git -C "$dir" remote get-url --push "$name" 2>/dev/null)
     [[ -n $url ]] && { _PUSH_URLS="$url"; return; }
@@ -355,7 +366,7 @@ main() {
     # Claude could clear any flag for a child process it spawns). This hook is
     # a separate execution path that only ever runs for Claude, so there is
     # nothing here for Claude to unset. ──
-    resolve_push_urls "$_TARGET" "$cmd"
+    resolve_push_urls "$_TARGET" "$_STRIPPED_HD"
     if ! all_whitelisted "$_PUSH_URLS"; then
       echo "BLOCKED: this would commit/push to a repo that is not ours." >&2
       if [[ -n $_PUSH_URLS ]]; then
