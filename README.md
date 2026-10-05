@@ -144,7 +144,7 @@ src/git-guard.sh     shim: repos armed before v3 exec it; it execs the exe
 templates/hooks/     one-line stubs copied into each repo's .git/hooks
   pre-commit  commit-msg  pre-push
 tests/               offline test suites
-  git-guard.test.sh  claude-git-guard.test.sh
+  git-guard.test.sh  claude-git-guard.test.sh  stubs.test.mjs
 ```
 
 ### Running the tests
@@ -152,6 +152,7 @@ tests/               offline test suites
 ```bash
 bash tests/git-guard.test.sh          # the content judge
 bash tests/claude-git-guard.test.sh   # the Claude hook
+node tests/stubs.test.mjs             # stubs stay one exec, no forks
 ```
 
 Both run the exe under `csharp/bin/Release/net9.0/win-x64/publish/`; build it
