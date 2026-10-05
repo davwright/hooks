@@ -404,6 +404,9 @@ internal static partial class Program
         {
             var values = ProfileAssignRe().Matches(command).Select(m => StripQuoteChars(m.Groups[1].Value)).Distinct().ToList();
             var nonEmpty = values.Where(v => v.Length > 0).ToList();
+            // Fix 2026-10-05: zwei Werte fielen bis hierher auf $EVOLX_PROFILE des Hooks durch.
+            // War dort ein erlaubtes Profil gesetzt, lief ein Wechsel auf ein Kundenprofil durch.
+            if (nonEmpty.Count > 1) return "";
             if (nonEmpty.Count == 1)
             {
                 // `EVOLX_PROFILE=''` neben einem echten Wert ist ebenfalls ein Wechsel.

@@ -138,6 +138,17 @@ for (const [label, expect, command, file] of [
   ok ? pass++ : fail++;
   console.log(`${ok ? "PASS" : "FAIL"}  [${label}]${ok ? "" : `  got exit=${r.status}`}`);
 }
+// Fix 2026-10-05: with an allowed profile in the hook's own environment, a command that switches
+// between two profiles fell through to that profile and was allowed.
+for (const [label, expect, command] of [
+  ["zwei Profile, erlaubtes Profil in der Umgebung", "block", "export EVOLX_PROFILE=allowedprofile; ev dv webresource publish a.js --live; export EVOLX_PROFILE=customerprofile; ev dv webresource publish b.js --live"],
+  ["kein Profil im Befehl, erlaubtes in der Umgebung", "allow", "ev dv webresource publish a.js --live"],
+]) {
+  const r = run(JSON.stringify({ tool_input: { command }, cwd: process.cwd() }), { ...env, EVOLX_PROFILE: "allowedprofile" });
+  const ok = (expect === "allow" && r.status === 0) || (expect === "block" && r.status === 2);
+  ok ? pass++ : fail++;
+  console.log(`${ok ? "PASS" : "FAIL"}  [${label}]${ok ? "" : `  got exit=${r.status}`}`);
+}
 const garbled = run("not json");
 garbled.status === 2 ? pass++ : fail++;
 console.log(`${garbled.status === 2 ? "PASS" : "FAIL"}  [unparsable hook input blocks]`);
