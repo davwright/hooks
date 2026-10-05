@@ -1,11 +1,11 @@
 #!/bin/bash
-# Tests for git-guard.sh — the CONTENT judge.
+# Tests for the git-side CONTENT judge (git-guard.exe <hook> ...).
 #
 # Contract under test (v2). This hook fires for EVERYONE (user's terminal,
 # VSCode SCM panel, Claude alike), so it enforces only the rule that should
 # bind everyone: no AI-tool words in a CUSTOMER repo's history. The
 # destination rule ("Claude may not push to customer repos") lives in
-# claude-git-guard.sh and is NOT tested here.
+# the Claude PreToolUse hook and is NOT tested here.
 #
 #   1. SCOPE     own repo (github / dev.azure.com/evolx) -> never scanned
 #                customer repo (anything else)           -> scanned
@@ -22,15 +22,17 @@
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GUARD="$ROOT/src/git-guard.sh"
-[ -f "$GUARD" ] || { echo "FATAL: git-guard.sh not found at $GUARD" >&2; exit 2; }
+# The same binary as the Claude hook; a hook name as argv[1] selects this judge.
+GUARD="${GUARD:-$ROOT/csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe}"
+[ -f "$GUARD" ] || { echo "FATAL: judge not found at $GUARD (dotnet publish -r win-x64 -c Release in csharp/)" >&2; exit 2; }
 
 # Tee everything to a log so the result can be read from disk instead of
 # copied out of a terminal. Override with LOG=<path>.
 LOG="${LOG:-$ROOT/tests/git-guard.last.log}"
 exec > >(tee "$LOG") 2>&1
 
-TMP=$(mktemp -d); trap "rm -rf '$TMP'" EXIT
+# Under the real HOME, not /tmp: the exe is a native Win32 process.
+TMP=$(mktemp -d -p "$HOME"); trap "rm -rf '$TMP'" EXIT
 # Neutralize the self-update path: HOME with no template to sync from. We are
 # testing the JUDGE, not the stub refresh.
 export HOME="$TMP/home"; mkdir -p "$HOME"
@@ -118,19 +120,19 @@ seed() {
 setmsg() { printf '%s\n' "$2" > "$1/.git/COMMIT_EDITMSG"; }
 
 # run_commit <repo> -> exit code
-run_commit() { ( cd "$1" && bash "$GUARD" pre-commit ) >/dev/null 2>"$TMP/err"; echo $?; }
+run_commit() { ( cd "$1" && "$GUARD" pre-commit ) >/dev/null 2>"$TMP/err"; echo $?; }
 
 # run_msg <repo> <message> -> exit code. Mirrors how git invokes commit-msg:
 # argv is the path to the file holding the FINAL message.
 run_msg() {
   printf '%s\n' "$2" > "$1/.git/COMMIT_EDITMSG"
-  ( cd "$1" && bash "$GUARD" commit-msg .git/COMMIT_EDITMSG ) >/dev/null 2>"$TMP/err"
+  ( cd "$1" && "$GUARD" commit-msg .git/COMMIT_EDITMSG ) >/dev/null 2>"$TMP/err"
   echo $?
 }
 
 # run_push <repo> <url> <refline> -> exit code  (refline on stdin)
 run_push() {
-  printf '%s\n' "$3" | ( cd "$1" && bash "$GUARD" pre-push origin "$2" ) >/dev/null 2>"$TMP/err"
+  printf '%s\n' "$3" | ( cd "$1" && "$GUARD" pre-push origin "$2" ) >/dev/null 2>"$TMP/err"
   echo $?
 }
 
@@ -239,7 +241,7 @@ check 0 "$(run_msg "$CMSG" 'real subject
 diff --git a/f b/f
 +claude in the diff preview')" 'scissors section ignored'
 # Missing/absent message file is a no-op, not a crash.
-check 0 "$(cd "$CMSG" && bash "$GUARD" commit-msg .git/NOPE >/dev/null 2>"$TMP/err"; echo $?)" \
+check 0 "$(cd "$CMSG" && "$GUARD" commit-msg .git/NOPE >/dev/null 2>"$TMP/err"; echo $?)" \
   'absent message file: no-op'
 # Multi-line body, dirty only in a trailer.
 check_content 1 "$(run_msg "$CMSG" 'fix the thing
@@ -308,25 +310,24 @@ check 0 "$(run_push "$PP" 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git
   'push: empty ref list allowed'
 
 echo "== modes =="
-check 1 "$(bash "$GUARD" frobnicate </dev/null >/dev/null 2>"$TMP/err"; echo $?)" 'unknown mode -> blocked (fail closed)'
+check 1 "$("$GUARD" frobnicate </dev/null >/dev/null 2>"$TMP/err"; echo $?)" 'unknown mode -> blocked (fail closed)'
 
 echo "== regression: script must define everything it calls =="
-# The v2 rewrite dropped self_update_stub while still calling it. Catch that
-# class of error: no "command not found" on any normal path.
+# No "command not found" on any normal path.
 D=$(mkrepo sanity 'https://github.com/me/x.git'); stage "$D" f.txt ok; setmsg "$D" ok
-( cd "$D" && bash "$GUARD" pre-commit ) >/dev/null 2>"$TMP/err2"
+( cd "$D" && "$GUARD" pre-commit ) >/dev/null 2>"$TMP/err2"
 check 0 "$(grep -ci 'command not found' "$TMP/err2" || true)" 'no undefined-function errors on pre-commit'
-printf '' | ( cd "$D" && bash "$GUARD" pre-push origin 'https://github.com/me/x.git' ) >/dev/null 2>"$TMP/err3"
+printf '' | ( cd "$D" && "$GUARD" pre-push origin 'https://github.com/me/x.git' ) >/dev/null 2>"$TMP/err3"
 check 0 "$(grep -ci 'command not found' "$TMP/err3" || true)" 'no undefined-function errors on pre-push'
 setmsg "$D" ok
-( cd "$D" && bash "$GUARD" commit-msg .git/COMMIT_EDITMSG ) >/dev/null 2>"$TMP/err4"
+( cd "$D" && "$GUARD" commit-msg .git/COMMIT_EDITMSG ) >/dev/null 2>"$TMP/err4"
 check 0 "$(grep -ci 'command not found' "$TMP/err4" || true)" 'no undefined-function errors on commit-msg'
 
 echo "== stub templates cover every mode =="
 for h in pre-commit commit-msg pre-push; do
   check 0 "$([ -f "$ROOT/templates/hooks/$h" ] && echo 0 || echo 1)" "template stub exists: $h"
-  check 0 "$(grep -q "git-guard.sh\|\$CANON\" $h" "$ROOT/templates/hooks/$h" 2>/dev/null && echo 0 || echo 1)" \
-    "stub $h execs the canonical with mode $h"
+  check 0 "$(grep -qF "exec \"\$G\" $h \"\$@\"" "$ROOT/templates/hooks/$h" 2>/dev/null && echo 0 || echo 1)" \
+    "stub $h execs the judge with mode $h"
 done
 
 echo ""

@@ -3,3 +3,4 @@
 *.sh           text eol=lf
 templates/hooks/pre-commit  text eol=lf
 templates/hooks/pre-push    text eol=lf
+templates/hooks/commit-msg  text eol=lf

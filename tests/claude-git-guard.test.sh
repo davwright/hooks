@@ -1,32 +1,21 @@
 #!/bin/bash
-# Tests for claude-git-guard.sh (the thin Claude PreToolUse hook). Feeds it the
+# Tests for claude-git-guard.exe (the thin Claude PreToolUse hook). Feeds it the
 # PreToolUse JSON shape and asserts exit codes + self-heal side effects.
 #
 # Run: bash claude-git-guard.test.sh   (exit 0 = all pass)
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# Which implementation to test. Default: the bash hook, run via `bash`.
-# Override to test the NativeAOT C# port — either give a full path, or just
-# say `exe` to use the built binary under csharp/:
-#   GUARD_CMD=exe bash tests/claude-git-guard.test.sh
-#   GUARD_CMD="<path>/claude-git-guard.exe" bash tests/claude-git-guard.test.sh
-# GUARD_CMD is invoked directly (the exe needs no interpreter); the default
-# bash hook is prefixed with `bash` so it runs the same on Windows.
-GUARD_CMD="${GUARD_CMD:-bash $ROOT/src/claude-git-guard.sh}"
-[ "$GUARD_CMD" = "exe" ] && GUARD_CMD="$ROOT/csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe"
-# Sanity-check the runner resolves to something that exists.
-_RUNNER=${GUARD_CMD%% *}
-case "$_RUNNER" in
-  bash) [ -f "$ROOT/src/claude-git-guard.sh" ] || { echo "FATAL: claude-git-guard.sh not found" >&2; exit 2; } ;;
-  *)    [ -x "$_RUNNER" ] || [ -f "$_RUNNER" ] || { echo "FATAL: GUARD_CMD runner not found: $_RUNNER" >&2; exit 2; } ;;
-esac
+# The NativeAOT exe under csharp/ (dotnet publish -r win-x64 -c Release), or
+# GUARD_CMD=<path> for another build, e.g. the installed copy.
+GUARD_CMD="${GUARD_CMD:-$ROOT/csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe}"
+[ -f "$GUARD_CMD" ] || { echo "FATAL: GUARD_CMD not found: $GUARD_CMD" >&2; exit 2; }
 echo "# runner: $GUARD_CMD"
 
 # Root the temp dir on a real drive (under the real $HOME, which Git Bash
 # reports as /c/...), NOT /tmp: the NativeAOT exe is a native Win32 process and
 # only understands drive-letter paths. /tmp is MSYS-internal and won't resolve
-# for the exe. Git Bash maps /c/ -> C:\ for both runners, so bash is unaffected.
+# for the exe.
 _REALHOME="$HOME"
 TMP=$(mktemp -d -p "$_REALHOME"); trap "rm -rf '$TMP'" EXIT
 # Deploy a fake git template so self-heal has stubs to install from. This also
@@ -53,7 +42,7 @@ PASS=0; FAIL=0
 run() {  # $1=cwd $2=command -> echo exit code
   printf '{"cwd":%s,"tool_input":{"command":%s}}' \
     "$(printf %s "$1" | jq -Rs .)" "$(printf %s "$2" | jq -Rs .)" \
-    | $GUARD_CMD >/dev/null 2>"$TMP/err"; echo $?
+    | "$GUARD_CMD" >/dev/null 2>"$TMP/err"; echo $?
 }
 check() {
   local expected="$1" actual="$2" label="$3"
@@ -204,7 +193,7 @@ echo "== read-only mirror: default-branch checkout of a repo that is not ours ==
 run_file() {  # $1=tool $2=key $3=path -> exit code
   printf '{"cwd":%s,"tool_name":"%s","tool_input":{"%s":%s,"content":"x"}}' \
     "$(printf %s "$ALLOWED" | jq -Rs .)" "$1" "$2" "$(printf %s "$3" | jq -Rs .)" \
-    | $GUARD_CMD >/dev/null 2>"$TMP/err"; echo $?
+    | "$GUARD_CMD" >/dev/null 2>"$TMP/err"; echo $?
 }
 check_err 2 "$(run "$MIRROR" 'git add f.txt')"                 'mirror: git add <path> BLOCKED' 'read-only mirror'
 check_err 2 "$(run_file Edit file_path "$MIRROR/f.txt")"        'mirror: Edit BLOCKED' 'read-only mirror'

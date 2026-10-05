@@ -29,14 +29,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -WhatIf
 
 ### What the installer does
 
-1. Installs the **whitelist judge** to `~\.githooks\git-guard.sh`.
+0. Builds `csharp/` (NativeAOT; needs the **.NET SDK** and the **VS C++ build
+   tools**). One exe serves both layers. If it can't be built, the install fails.
+1. Installs the **content judge** to `~\.githooks\git-guard.exe`.
 2. Installs a **git template** to `~\.git-template\hooks\` and points
    `git config --global init.templateDir` at it — so every future
    `git init` / `git clone` is guarded automatically, with zero extra steps.
-3. Installs the **Claude Code hook** to `~\.claude\hooks\` and registers it in
-   `~\.claude\settings.json`. By default it installs the fast native build (see
-   [Native vs bash](#native-vs-bash)); if your machine can't build it, it
-   silently falls back to the shell version.
+3. Installs the **Claude Code hook** to `~\.claude\hooks\claude-git-guard.exe`
+   and registers it in `~\.claude\settings.json` in exec form (see
+   [Hooks must not run through a shell](#hooks-must-not-run-through-a-shell)).
 
 ---
 
@@ -56,21 +57,11 @@ A blocked command prints a one-line reason and Claude sees it as a refusal.
 
 ## Changing the whitelist
 
-Edit the `WHITELIST` array near the top of `~\.githooks\git-guard.sh` (the
-deployed copy) and the small mirror in the Claude hook. The patterns are
-case-insensitive regexes matched against the remote URL, e.g.:
-
-```bash
-WHITELIST=(
-  'github\.com'
-  'dev\.azure\.com/evolx/'
-  'gitlab\.com/myorg/'      # <- add your own
-)
-```
-
-The source of truth lives in this repo at [`src/git-guard.sh`](src/git-guard.sh);
-edit there, re-run `Install.ps1`, and every repo picks it up on its next
-commit/push (they all call the one deployed file — no per-repo updates needed).
+The whitelist is the `GithubRe` / `AdoEvolxRe` / `AdoEvolxSshRe` regexes at the
+bottom of [`csharp/Program.cs`](csharp/Program.cs), anchored at the URL start and
+matched case-insensitively. Both layers use them. Edit, re-run `Install.ps1`,
+and every repo picks it up on its next commit/push (they all exec the one
+deployed exe).
 
 ---
 
@@ -99,7 +90,7 @@ claude-git-guard  (Claude PreToolUse hook — THIN)
    • otherwise gets out of the way
    │
    ▼
-.git/hooks/pre-commit & pre-push  →  git-guard.sh  (per-repo — the REAL judge)
+.git/hooks/pre-commit, commit-msg, pre-push  →  git-guard.exe <hook>  (per-repo)
    • pre-push:   whitelist-checks the destination URL git hands it directly
    • pre-commit: whitelist-checks the repo's configured push remote
    • commit-msg / pre-push: in a repo that is not ours, also refuses private
@@ -115,22 +106,29 @@ string guessing.
 
 ---
 
-## Native vs bash
+## Hooks must not run through a shell
 
-The Claude hook fires on **every** Bash command Claude runs, so its startup cost
-is recurring latency. On Windows the shell version pays the MSYS `bash.exe`
-startup tax (~0.5 s) on every call. The repo ships a **NativeAOT C# port** with
-an identical contract that runs ~3–4× faster (measured: 852 → 276 ms on a
-non-git command). `Install.ps1` prefers it automatically.
+On this machine every MSYS process start (Git Bash, `sh`, and each `$(...)`,
+pipe, `sed` or `grep` inside a script) costs ~1.4 s idle and 5–12 s under load
+(AV/EDR on process creation). Node starts in 0.4–1.2 s, the NativeAOT exe in
+~40 ms.
 
-| | |
-|---|---|
-| Force the native build | `Install.ps1 -HookImpl native` |
-| Force the shell build | `Install.ps1 -HookImpl bash` |
-| Default | `auto` — native if buildable, else bash |
+The bash judge forked ~25 MSYS processes per hook, and a commit runs two hooks:
+**118 s** for one `git commit --allow-empty` (customer remote: 152 s). As one exe
+behind a one-line `exec` stub: **4.5 s** (customer: 6.4 s), under the same load
+(`bash -c true` ≈ 5 s). Git for Windows only runs script hooks, so one `sh` per
+hook is the floor.
 
-Building native needs the **.NET SDK** and the **VS C++ build tools** (MSVC).
-Without them, `auto` just uses bash — no error.
+Claude Code cancels a hook at its timeout, and this guard then **fails open**:
+the command runs unguarded. So a Claude hook is a native exe or node, registered
+in exec form (`args` present = no shell):
+
+```json
+{ "type": "command", "command": "C:/Users/<you>/.claude/hooks/claude-git-guard.exe", "args": [], "timeout": 10 }
+```
+
+The old shell form `~/.claude/hooks/claude-git-guard.exe` started bash first;
+that was the 0.8–5 s per call, not the exe.
 
 ---
 
@@ -139,12 +137,12 @@ Without them, `auto` just uses bash — no error.
 ```
 README.md            you are here
 Install.ps1          idempotent installer
-src/                 the two hook scripts (edit these)
-  git-guard.sh         canonical whitelist judge (holds the WHITELIST)
-  claude-git-guard.sh  thin Claude PreToolUse hook
-templates/hooks/     thin stubs copied into each repo's .git/hooks
-  pre-commit  pre-push
-csharp/              NativeAOT port of the Claude hook (+ bench.sh)
+csharp/              the guard, one exe for both layers
+  Program.cs           Claude PreToolUse hook (holds the whitelist)
+  GitHook.cs           content judge: git-guard.exe <hook> ...
+src/git-guard.sh     shim: repos armed before v3 exec it; it execs the exe
+templates/hooks/     one-line stubs copied into each repo's .git/hooks
+  pre-commit  commit-msg  pre-push
 tests/               offline test suites
   git-guard.test.sh  claude-git-guard.test.sh
 ```
@@ -152,12 +150,12 @@ tests/               offline test suites
 ### Running the tests
 
 ```bash
-bash tests/git-guard.test.sh                 # the judge
-bash tests/claude-git-guard.test.sh          # the Claude hook (bash build)
-GUARD_CMD=exe bash tests/claude-git-guard.test.sh   # same suite, native build
+bash tests/git-guard.test.sh          # the content judge
+bash tests/claude-git-guard.test.sh   # the Claude hook
 ```
 
-All green = the two implementations behave identically.
+Both run the exe under `csharp/bin/Release/net9.0/win-x64/publish/`; build it
+first (`dotnet publish -r win-x64 -c Release` in `csharp/`).
 
 ---
 
@@ -176,6 +174,3 @@ All green = the two implementations behave identically.
   (colleagues on its `main`) is "ours", so the branch/stash/mirror rules and
   the Pulse-id rule don't apply there. File writes made through shell commands
   (not the Edit/Write tools) are not judged by the mirror rule.
-- **The whitelist lives in two synced places**: `src/git-guard.sh` (the judge)
-  and a small mirror in `src/claude-git-guard.sh` (only for the `remote add`
-  exception). Keep them in step.

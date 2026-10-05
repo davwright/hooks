@@ -1,6 +1,5 @@
-// claude-git-guard — NativeAOT port of claude-git-guard.sh (the THIN Claude Code
-// PreToolUse hook). Same contract: PreToolUse JSON on stdin, exit 0 = allow,
-// exit 2 = block (message on stderr).
+// claude-git-guard — the THIN Claude Code PreToolUse hook. Contract: PreToolUse
+// JSON on stdin, exit 0 = allow, exit 2 = block (message on stderr).
 //
 // This hook fires ONLY for Claude, by construction — it is a separate execution
 // path, not a flag Claude could clear. So it owns the rule that must bind Claude
@@ -18,10 +17,8 @@
 //      --hard, clean -f or worktree add. A checkout of the remote's DEFAULT
 //      branch there is a read-only mirror: no Edit/Write into it, no git add.
 //      Registered for Bash, PowerShell and the file-edit tools.
-// The per-repo git hook (git-guard.sh) owns the CONTENT rule instead: no
-// AI-tool words in a customer repo's history, enforced for everyone.
-// Logic is a faithful port of the bash version — the same test suite must pass
-// against either implementation.
+// The per-repo git hook (GitHook.cs, same binary) owns the CONTENT rule
+// instead: no AI-tool words in a customer repo's history, enforced for everyone.
 
 using System.Text;
 using System.Text.Json;
@@ -32,8 +29,6 @@ namespace ClaudeGitGuard;
 
 internal static partial class Program
 {
-    const int GuardStubVersion = 2;
-
     static string TemplateHooks =>
         Path.Combine(Home, ".git-template", "hooks");
 
@@ -55,8 +50,13 @@ internal static partial class Program
         return p;
     }
 
-    static int Main()
+    // No arguments: the Claude PreToolUse hook. A hook name as the first
+    // argument: the per-repo git hook, the CONTENT judge (GitHook.cs).
+    static int Main(string[] args)
     {
+        if (args.Length > 0)
+            return RunGitHook(args);
+
         string input = Console.In.ReadToEnd();
 
         // Fast bail: no "git" substring and no file-tool path -> no work.
@@ -402,6 +402,8 @@ internal static partial class Program
         // normalize before any Win32 filesystem op OR child-process working dir.
         dir = ToWindowsPath(dir);
 
+        if (!Directory.Exists(TemplateHooks)) return "ok"; // no template -> defer
+
         string? hookdir = GitHooksDir(dir);
         if (string.IsNullOrEmpty(hookdir)) return "norepo";
 
@@ -409,8 +411,6 @@ internal static partial class Program
         hookdir = ToWindowsPath(hookdir);
         if (!IsAbsolute(hookdir))
             hookdir = Path.Combine(dir, hookdir);
-
-        if (!Directory.Exists(TemplateHooks)) return "ok"; // no template -> defer
         try { Directory.CreateDirectory(hookdir); } catch { /* best-effort */ }
 
         bool foreign = false;
@@ -640,8 +640,8 @@ internal static partial class Program
 
     // Anchored at the URL start and terminated at the host boundary, so a URL
     // that merely CONTAINS one of these does not match ('github.com.evil.io/x',
-    // 'https://oebb.example.com/github.com/osis'). Keep in sync with
-    // OWN_REMOTES in git-guard.sh.
+    // 'https://oebb.example.com/github.com/osis'). The content
+    // judge (GitHook.cs) classifies repos with the same three.
     [GeneratedRegex(@"^(https://|git@|ssh://git@)github\.com[/:]")]
     private static partial Regex GithubRe();
 

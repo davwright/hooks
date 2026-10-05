@@ -1,5 +1,6 @@
-#!/bin/bash
-# git-guard-stub v2 — DO NOT EDIT. Thin stub; all logic is in the canonical.
-CANON="$HOME/.githooks/git-guard.sh"
-[ -r "$CANON" ] || { echo "git-guard: canonical missing at $CANON — refusing (fail closed). Run Install.ps1." >&2; exit 1; }
-exec "$CANON" pre-push "$@"
+#!/bin/sh
+# git-guard-stub v3 — DO NOT EDIT. One exec: every extra process in a hook costs
+# a second or more on this machine. All logic is in git-guard.exe.
+G="$HOME/.githooks/git-guard.exe"
+[ -x "$G" ] || { echo "git-guard: $G missing — refusing (fail closed). Run Install.ps1." >&2; exit 1; }
+exec "$G" pre-push "$@"
