@@ -13,8 +13,9 @@
          so every future `git init` / `git clone` is armed automatically.
       3. The Claude hook     -> ~\.claude\hooks\claude-git-guard.exe
                                 + registers it in ~\.claude\settings.json under
-                                PreToolUse for Bash, PowerShell and Edit/Write/MultiEdit/NotebookEdit,
-                                in exec form (args present = no shell), REPLACING
+                                PreToolUse for the shell, file and read tools plus the
+                                Atlassian and plugin-Playwright MCP tools (one exe runs
+                                the git, claude-guard and ev guards), in exec form (args present = no shell), REPLACING
                                 any older git-guard entry.
 
     No shell versions: a hook run through bash costs seconds per call on this
@@ -123,7 +124,7 @@ if (-not ($settings.hooks.PSObject.Properties.Name -contains 'PreToolUse')) {
 # Strip every git-guard command from EVERY entry - other matchers may already
 # list it - then register it once, in its own entry. Every other hook is
 # preserved; an entry left empty is dropped.
-$Matcher = 'Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit'
+$Matcher = 'Bash|PowerShell|Read|Grep|Glob|Edit|Write|MultiEdit|NotebookEdit|mcp__.*[Aa]tlassian.*|mcp__plugin_.*playwright.*'
 $preList = @()
 foreach ($e in @($settings.hooks.PreToolUse)) {
     $kept = @($e.hooks | Where-Object { $GuardCmds -notcontains $_.command })

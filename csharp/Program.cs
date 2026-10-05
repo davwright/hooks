@@ -19,10 +19,14 @@
 //      Registered for Bash, PowerShell and the file-edit tools.
 // The per-repo git hook (GitHook.cs, same binary) owns the CONTENT rule
 // instead: no AI-tool words in a customer repo's history, enforced for everyone.
+//
+// The same exe also runs the other PreToolUse guards, so one native process
+// judges every tool call (node costs 0.4-1.2 s per start here, this ~40 ms):
+// the git checks below, then claude-guard (ClaudeGuard.cs), then the ev
+// customer-write guard (EvGuard.cs). The first block wins.
 
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace ClaudeGitGuard;
@@ -57,7 +61,35 @@ internal static partial class Program
         if (args.Length > 0)
             return RunGitHook(args);
 
-        string input = Console.In.ReadToEnd();
+        // Claude Code writes UTF-8 and reads our stderr as UTF-8; the console
+        // code page would mangle umlauts in paths and the dashes in messages.
+        string input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false)).ReadToEnd();
+        Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
+
+        Hook hook;
+        try
+        {
+            hook = Hook.Parse(input);
+        }
+        catch (JsonException)
+        {
+            Console.Error.WriteLine("BLOCKED: failed to parse hook input.");
+            return 2;
+        }
+
+        int rc = GitGuard(input, hook);
+        if (rc == 0) rc = ClaudeGuard(hook);
+        if (rc == 0) rc = EvGuard(hook);
+        return rc;
+    }
+
+    static int GitGuard(string input, Hook hook)
+    {
+        // The union matcher also sends Read/Grep/Glob and MCP calls; the git
+        // checks judge only the tools they were written for (no tool name: the
+        // test harness).
+        if (hook.Tool is not ("" or "Bash" or "PowerShell" or "Edit" or "Write" or "MultiEdit" or "NotebookEdit"))
+            return 0;
 
         // Fast bail: no "git" substring and no file-tool path -> no work.
         // Mirrors the bash `case "$input" in ...` on the raw JSON.
@@ -66,21 +98,9 @@ internal static partial class Program
             && !input.Contains("\"notebook_path\"", StringComparison.Ordinal))
             return 0;
 
-        string cmd;
-        string cwd;
-        string file;
-        try
-        {
-            var hook = JsonSerializer.Deserialize(input, HookJson.Default.HookInput);
-            cmd = hook?.ToolInput?.Command ?? "";
-            cwd = hook?.Cwd ?? "";
-            file = hook?.ToolInput?.FilePath ?? hook?.ToolInput?.NotebookPath ?? "";
-        }
-        catch (JsonException)
-        {
-            Console.Error.WriteLine("BLOCKED: failed to parse hook input.");
-            return 2;
-        }
+        string cmd = hook.Command ?? "";
+        string cwd = hook.Cwd ?? "";
+        string file = hook.FilePath ?? hook.NotebookPath ?? "";
 
         // ── File-edit tools (Edit/Write/MultiEdit/NotebookEdit) ──
         if (file.Length > 0)
@@ -652,19 +672,41 @@ internal static partial class Program
     private static partial Regex AdoEvolxSshRe();
 }
 
-internal sealed class HookInput
+// The PreToolUse fields the guards read. JsonDocument, not reflection (AOT).
+// A field of the wrong JSON type is a parse error: the hook fails closed.
+internal sealed class Hook
 {
-    [JsonPropertyName("cwd")] public string? Cwd { get; set; }
-    [JsonPropertyName("tool_input")] public ToolInput? ToolInput { get; set; }
-}
+    public string Tool = "";
+    public string? Cwd, Command, FilePath, NotebookPath, Path, Content, NewString;
+    public List<string> EditNewStrings = new();
 
-internal sealed class ToolInput
-{
-    [JsonPropertyName("command")] public string? Command { get; set; }
-    [JsonPropertyName("file_path")] public string? FilePath { get; set; }
-    [JsonPropertyName("notebook_path")] public string? NotebookPath { get; set; }
-}
+    public static Hook Parse(string json)
+    {
+        var h = new Hook();
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.ValueKind == JsonValueKind.Null) return h;
+        if (root.ValueKind != JsonValueKind.Object) throw new JsonException("hook input is not an object");
+        h.Tool = Str(root, "tool_name") ?? "";
+        h.Cwd = Str(root, "cwd");
+        if (!root.TryGetProperty("tool_input", out var ti) || ti.ValueKind == JsonValueKind.Null) return h;
+        if (ti.ValueKind != JsonValueKind.Object) throw new JsonException("tool_input is not an object");
+        h.Command = Str(ti, "command");
+        h.FilePath = Str(ti, "file_path");
+        h.NotebookPath = Str(ti, "notebook_path");
+        h.Path = Str(ti, "path");
+        h.Content = Str(ti, "content");
+        h.NewString = Str(ti, "new_string");
+        if (ti.TryGetProperty("edits", out var edits) && edits.ValueKind == JsonValueKind.Array)
+            foreach (var e in edits.EnumerateArray())
+                if (e.ValueKind == JsonValueKind.Object && Str(e, "new_string") is { } s) h.EditNewStrings.Add(s);
+        return h;
+    }
 
-[JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true)]
-[JsonSerializable(typeof(HookInput))]
-internal partial class HookJson : JsonSerializerContext;
+    static string? Str(JsonElement o, string key)
+    {
+        if (!o.TryGetProperty(key, out var v) || v.ValueKind == JsonValueKind.Null) return null;
+        if (v.ValueKind != JsonValueKind.String) throw new JsonException($"{key} is not a string");
+        return v.GetString();
+    }
+}
