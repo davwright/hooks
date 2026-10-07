@@ -84,7 +84,21 @@ internal static partial class Program
         new(s => PythonRe().IsMatch(s),
             "Python toolchain is not installed on this machine. Solve it in Node.js (node, npm, npx) or PowerShell 5.1 " +
             "(powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script.ps1>). If you genuinely need Python, ask the user before installing anything."),
+        // ev's profiles hold Claude's own permissions ("claude" section); writing them would let an
+        // agent grant itself. Reads (cat, grep, Get-Content) pass; anything that writes is blocked.
+        // SkipSearches: a commit message or grep that describes the rule is not a write.
+        new(s => EvProfileFileRe().IsMatch(s) && ShellWriteRe().IsMatch(s), EvProfileMsg, SkipSearches: true),
+        // ev recognises Claude by CLAUDECODE, which every command Claude runs inherits. Clearing it
+        // would make ev treat Claude as the person and skip the profile's permissions.
+        new(s => ClaudeMarkerRe().IsMatch(s), ClaudeMarkerMsg, SkipSearches: true),
     ];
+
+    const string EvProfileMsg = "ev's profile and policy files (~/.evolx/profiles/*.json, ~/.evolx/ev-policy.json) carry what Claude may " +
+        "change, so Claude may not write them. Use ev's verbs (ev profile set / bind / edit); permissions are the user's: " +
+        "ev profile claude <NAME> --<service> read|write, run by the user.";
+
+    const string ClaudeMarkerMsg = "CLAUDECODE tells ev that Claude is running it, so ev applies the profile's Claude permissions. " +
+        "Do not clear or change it. If a write is refused, ask the user to grant it: ev profile claude <NAME> --<service> write.";
 
     // A shell-form hook (a .sh, or a command line with arguments in `command`) starts Git Bash, which
     // takes 1.5s idle and 5-12s under load here. Claude Code cancels the hook at its timeout, so a guard
@@ -121,6 +135,10 @@ internal static partial class Program
                 if (rule.Test(text)) return ClaudeBlock(rule.Msg);
             }
         }
+        else if (tool is "Edit" or "Write" or "MultiEdit" or "NotebookEdit" && IsEvProfileFile(h.FilePath ?? h.NotebookPath ?? ""))
+        {
+            return ClaudeBlock(EvProfileMsg);
+        }
         else if (tool is "Edit" or "Write" or "MultiEdit")
         {
             var parts = new List<string>();
@@ -149,9 +167,28 @@ internal static partial class Program
         return 0;
     }
 
+    static bool IsEvProfileFile(string path)
+    {
+        string n = Norm(path);
+        return n.StartsWith($"{UserHome}/.evolx/profiles/", StringComparison.Ordinal) || n == $"{UserHome}/.evolx/ev-policy.json";
+    }
+
     // Statements that only mention commands: searches, and commit messages that describe a change.
     static string WithoutSearches(string command) =>
         string.Join("\n", StatementSplitRe().Split(HeredocBodyRe().Replace(command, "\n")).Where(s => !SearchRe().IsMatch(s)));
+
+    [GeneratedRegex(@"\.evolx[\\/]+(profiles\b|ev-policy\.json)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex EvProfileFileRe();
+
+    // A redirect (not 2> or >&), a writing cmdlet or tool, or an in-place edit.
+    [GeneratedRegex(@"(?<![0-9&>])>>?(?!&)|\b(Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|Rename-Item|New-Item|cp|mv|rm|del|tee|writeFileSync|writeFile|appendFileSync|WriteAllText|WriteAllBytes|rename|unlink)\b|\bsed\s+-i",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ShellWriteRe();
+
+    // Assigning, unsetting or removing CLAUDECODE in bash, PowerShell, .NET or Node. Reading it passes.
+    [GeneratedRegex(@"\bCLAUDECODE\s*=|\b(unset|env)\s+(-u\s+)?CLAUDECODE\b|\$env:CLAUDECODE\s*=|Remove-Item\s+(-Path\s+)?env:\\?CLAUDECODE|SetEnvironmentVariable\(\s*[""']CLAUDECODE|process\.env\.CLAUDECODE\s*=|delete\s+process\.env\.CLAUDECODE",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex ClaudeMarkerRe();
 
     [GeneratedRegex(@"\baz\s+repos\s+pr\b", JsI)]
     private static partial Regex AzReposPrRe();

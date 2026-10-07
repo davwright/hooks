@@ -107,6 +107,31 @@ const cases = [
       [w("c:\\git\\x\\run.sh", "#!/bin/bash\necho hi"), 0],
     ];
   })(),
+  // ev's profiles carry Claude's own permissions: Claude reads them, never writes them.
+  ...(() => {
+    const prof = `${H}\\.evolx\\profiles\\kpmg.json`, fwd = prof.replace(/\\/g, "/");
+    const edit = (tool, file_path) => ({ tool_name: tool, tool_input: { file_path, content: "{}", old_string: "a", new_string: "b" }, cwd: other });
+    return [
+      [edit("Edit", prof), 2], [edit("Write", `${H}\\.evolx\\ev-policy.json`), 2], [edit("MultiEdit", prof), 2],
+      [{ tool_name: "Read", tool_input: { file_path: prof }, cwd: other }, 0],
+      [edit("Write", `${H}\\.evolx\\notes.md`), 0],
+      [sh(`cat ${fwd}`), 0], [sh(`grep -n envUrl ${fwd} 2>/dev/null`), 0],
+      [sh(`Get-Content "${prof}" | ConvertFrom-Json`, other, "PowerShell"), 0],
+      [sh(`echo '{}' > ${fwd}`), 2],
+      [sh(`Set-Content -Path "${prof}" -Value '{}'`, other, "PowerShell"), 2],
+      [sh(`node -e "require('fs').writeFileSync('${fwd}','{}')"`), 2],
+      [sh(`sed -i 's/read/write/' ${fwd}`), 2],
+      [sh(`cp /c/temp/x.json ${fwd}`), 2],
+      // A commit message that describes the rule is not a write (blocked the commit of this rule).
+      [sh(`git commit -q -F - <<'EOF'\nblock writes to ~/.evolx/profiles/*.json (rm, sed -i, writeFileSync) and CLAUDECODE= tricks\nEOF`, own), 0],
+    ];
+  })(),
+  // ev tells Claude from a person by CLAUDECODE; clearing it would skip the profile's permissions.
+  [sh("CLAUDECODE= node deploy.mjs"), 2], [sh("env -u CLAUDECODE node deploy.mjs"), 2], [sh("unset CLAUDECODE; node deploy.mjs"), 2],
+  [sh("$env:CLAUDECODE = $null; node deploy.mjs", other, "PowerShell"), 2],
+  [sh("Remove-Item env:CLAUDECODE", other, "PowerShell"), 2],
+  [sh("[Environment]::SetEnvironmentVariable('CLAUDECODE', $null)", other, "PowerShell"), 2],
+  [sh("echo $CLAUDECODE"), 0], [sh('"in a child: " + $env:CLAUDECODE', other, "PowerShell"), 0],
 ];
 let bad = 0;
 for (const [inp, want] of cases) {
