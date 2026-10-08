@@ -84,7 +84,7 @@ internal static partial class Program
         new(s => PythonRe().IsMatch(s),
             "Python toolchain is not installed on this machine. Solve it in Node.js (node, npm, npx) or PowerShell 5.1 " +
             "(powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script.ps1>). If you genuinely need Python, ask the user before installing anything."),
-        // ev's profiles hold Claude's own permissions ("claude" section); writing them would let an
+        // ev's profiles hold the agent permissions ("agent" section); writing them would let an
         // agent grant itself. Reads (cat, grep, Get-Content) pass; anything that writes is blocked.
         // SkipSearches: a commit message or grep that describes the rule is not a write.
         new(s => EvProfileFileRe().IsMatch(s) && ShellWriteRe().IsMatch(s), EvProfileMsg, SkipSearches: true),
@@ -95,10 +95,10 @@ internal static partial class Program
 
     const string EvProfileMsg = "ev's profile and policy files (~/.evolx/profiles/*.json, ~/.evolx/ev-policy.json) carry what Claude may " +
         "change, so Claude may not write them. Use ev's verbs (ev profile set / bind / edit); permissions are the user's: " +
-        "ev profile claude <NAME> --<service> read|write, run by the user.";
+        "ev profile agent <NAME> --<service> read|write, run by the user.";
 
     const string ClaudeMarkerMsg = "CLAUDECODE tells ev that Claude is running it, so ev applies the profile's Claude permissions. " +
-        "Do not clear or change it. If a write is refused, ask the user to grant it: ev profile claude <NAME> --<service> write.";
+        "Do not clear or change it. If a write is refused, ask the user to grant it: ev profile agent <NAME> --<service> write.";
 
     // A shell-form hook (a .sh, or a command line with arguments in `command`) starts Git Bash, which
     // takes 1.5s idle and 5-12s under load here. Claude Code cancels the hook at its timeout, so a guard
