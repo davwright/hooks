@@ -82,6 +82,10 @@ const cases = [
   ["WI create customer", "block", "ev ado wi create --title hi --live", DENIED],
   ["PR comment customer", "block", "ev ado pr comment 1 hi --live", DENIED],
   ["PR create non-ADO → deny", "block", "ev ado pr create --source x --title y --live", GITHUB],
+  ["ev git push our project", "allow", "ev git push origin main --live", ALLOWED],
+  ["ev git push customer", "block", "ev git push origin main --live", DENIED],
+  ["ev git push dry run", "allow", "ev git push origin main", DENIED],
+  ["ev git fetch customer (read)", "allow", "ev git fetch origin", DENIED],
 
   // Chained: ANY blocked clause blocks the whole command
   ["chained read+write", "block", `ev dv whoami && ev dv schema table remove x --yes ${CUST} --live`],

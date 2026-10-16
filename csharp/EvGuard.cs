@@ -128,6 +128,9 @@ internal static partial class Program
         "ado wi comment",
         "ado wi close",
         "ado wi link",
+        // ev git push: an agent's only way to push to Azure DevOps (ev refuses it a git
+        // credential otherwise). Scoped by the cwd's origin like the ado verbs above.
+        "git push",
     ];
 
     static int EvBlock(string msg)
