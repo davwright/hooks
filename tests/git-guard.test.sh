@@ -300,6 +300,23 @@ check_content 1 "$(run_push "$PP" 'https://oebb-azure-platform@dev.azure.com/oeb
 check 0 "$(run_push "$PP" 'https://github.com/me/x.git' \
   "refs/heads/main $DIRTY_TIP refs/heads/main $CLEAN_TIP")" 'push: dirty range to own remote allowed'
 
+# A branch rebased onto main, force-pushed over its stale remote: the range from the
+# stale tip holds main's already-published history. That history is not re-judged.
+( cd "$PP" && git update-ref refs/remotes/origin/main "$DIRTY_TIP" )
+REBASED_TIP=$(seed "$PP" f.txt 'a
+b
+c
+d' 'clean on top of main')
+check 0 "$(run_push "$PP" 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c' \
+  "refs/heads/fixes $REBASED_TIP refs/heads/fixes $BASE")" 'push: published history behind a stale remote allowed'
+REBASED_DIRTY=$(seed "$PP" f.txt 'a
+b
+c
+d
+e' 'mentions claude')
+check_content 1 "$(run_push "$PP" 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c' \
+  "refs/heads/fixes $REBASED_DIRTY refs/heads/fixes $BASE")" 'push: new dirty commit over a stale remote BLOCKED'
+
 # Branch deletion (all-zero local sha) has nothing to scan.
 check 0 "$(run_push "$PP" 'https://oebb-azure-platform@dev.azure.com/oebb/c/_git/c' \
   "(delete) 0000000000000000000000000000000000000000 refs/heads/gone $CLEAN_TIP")" \

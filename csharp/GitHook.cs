@@ -101,10 +101,11 @@ internal static partial class Program
                     if (f.Length < 2) continue;
                     string lsha = f[1], rsha = f.Length > 3 ? f[3] : "";
                     if (AllZeros().IsMatch(lsha)) continue; // branch deletion
-                    // A new remote branch: only commits not already published elsewhere.
+                    // Only commits not already published on any remote ref: a branch rebased onto
+                    // main and pushed over its stale remote must not be judged on main's history.
                     string? range = AllZeros().IsMatch(rsha)
                         ? Git(cwd, "rev-list", lsha, "--not", "--remotes")
-                        : Git(cwd, "rev-list", $"{rsha}..{lsha}");
+                        : Git(cwd, "rev-list", lsha, "--not", rsha, "--remotes");
                     if (range is null) continue;
                     foreach (var sha in range.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
