@@ -85,6 +85,8 @@ const cases = [
   ["ev git push our project", "allow", "ev git push origin main --live", ALLOWED],
   ["ev git push customer", "block", "ev git push origin main --live", DENIED],
   ["ev git push dry run", "allow", "ev git push origin main", DENIED],
+  ["cd into our project from a GitHub cwd", "allow", `cd ${ALLOWED.replace(/\\/g, "/")} && ev git push --live`, GITHUB],
+  ["cd into customer from our project", "block", `cd ${DENIED.replace(/\\/g, "/")} && ev git push --live`, ALLOWED],
   ["ev git fetch customer (read)", "allow", "ev git fetch origin", DENIED],
 
   // Chained: ANY blocked clause blocks the whole command

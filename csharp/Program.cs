@@ -662,7 +662,7 @@ internal static partial class Program
     // that merely CONTAINS one of these does not match ('github.com.evil.io/x',
     // 'https://oebb.example.com/github.com/osis'). The content
     // judge (GitHook.cs) classifies repos with the same three.
-    [GeneratedRegex(@"^(https://|git@|ssh://git@)github\.com[/:]")]
+    [GeneratedRegex(@"^(https://([^@/]+@)?|git@|ssh://git@)github\.com[/:]")]
     private static partial Regex GithubRe();
 
     [GeneratedRegex(@"^https://([^@/]+@)?dev\.azure\.com/evolx/")]

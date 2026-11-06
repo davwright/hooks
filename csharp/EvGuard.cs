@@ -293,7 +293,7 @@ internal static partial class Program
             }
             else
             {
-                scope = ResolveAdoScope(clause, h.Cwd);
+                scope = ResolveAdoScope(clause, ResolveTarget(command, h.Cwd ?? ""));
                 scopeLabel = "ADO org/project";
             }
 
