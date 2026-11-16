@@ -116,7 +116,7 @@ block wins:
   plugin-Playwright and Atlassian MCP tools; Read/Grep/Glob of Pulse data. A
   statement that only searches for a name (grep, rg, Select-String, git
   log/show/diff/commit) or a heredoc body is not a use of it. Cwd under
-  `c:/git/extensions/devpulse` may use Jira and Pulse data directly.
+  `c:/git/tools/pulse` may use Jira and Pulse data directly.
 - **ev guard** ([`csharp/EvGuard.cs`](csharp/EvGuard.cs)), from EvolxCli — an
   `ev ... --live` clause is checked against `~/.evolx/ev-policy.json`
   (`EV_POLICY_FILE` overrides); fail-closed. Its verb tables

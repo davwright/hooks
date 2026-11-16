@@ -40,9 +40,9 @@ internal static partial class Program
         || (c >= '\u2000' && c <= '\u200a');
 
     const string PulseMsg = "Read Pulse tasks through the devpulse MCP tools (get_task, list_tasks, next_task, task_graph), " +
-        "not from the Pulse's files on disk. Direct file access is only for developing the Pulse itself, from c:/git/extensions/devpulse.";
+        "not from the Pulse's files on disk. Direct file access is only for developing the Pulse itself, from c:/git/tools/pulse.";
     const string JiraMsg = "Jira tickets go through the Pulse (devpulse MCP tools), not Jira directly. Direct Jira REST or " +
-        "Atlassian MCP is only for building Jira features into the Pulse, from c:/git/extensions/devpulse.";
+        "Atlassian MCP is only for building Jira features into the Pulse, from c:/git/tools/pulse.";
 
     sealed record Rule(Func<string, bool> Test, string Msg, bool SkipSearches = false, bool UnlessDevpulse = false);
 
@@ -120,7 +120,7 @@ internal static partial class Program
 
     static int ClaudeGuard(Hook h)
     {
-        bool devpulse = Norm(h.Cwd ?? "").StartsWith("c:/git/extensions/devpulse", StringComparison.Ordinal);
+        bool devpulse = Norm(h.Cwd ?? "").StartsWith("c:/git/tools/pulse", StringComparison.Ordinal);
         string tool = h.Tool;
 
         if (tool is "Bash" or "PowerShell")

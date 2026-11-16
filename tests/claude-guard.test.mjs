@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 
 const EXE = process.env.GUARD_CMD ?? new URL("../csharp/bin/Release/net9.0/win-x64/publish/claude-git-guard.exe", import.meta.url).pathname.slice(1);
 const H = process.env.USERPROFILE;
-const other = "C:\\git\\tools\\opus5.5", dev = "c:\\git\\extensions\\devpulse";
+const other = "C:\\git\\tools\\opus5.5", dev = "c:\\git\\tools\\pulse";
 
 // HOME without a git template (no self-heal into real repos) and with an ev policy (a command
 // that runs ev is blocked without one). USERPROFILE stays real: the Pulse rules are rooted there.
@@ -45,7 +45,7 @@ const cases = [
   [sh(`cat ${H.replace(/\\/g, "/")}/pulse/activity.jsonl`), 2],
   [sh(`Get-Content "${H}\\pulse\\activity.jsonl"`, other, "PowerShell"), 2],
   [{ tool_name: "Read", tool_input: { file_path: `${H}\\pulsestuff\\notes.md` }, cwd: other }, 0],
-  [{ tool_name: "Read", tool_input: { file_path: "c:\\git\\extensions\\devpulse\\README.md" }, cwd: other }, 0],
+  [{ tool_name: "Read", tool_input: { file_path: "c:\\git\\tools\\pulse\\README.md" }, cwd: other }, 0],
   [{ tool_name: "mcp__devpulse__get_task", tool_input: { id: "PS-961" }, cwd: other }, 0],
   [sh("git status"), 0],
   [sh("powershell -File c:/osis/tools/Deploy-Module.ps1 -Module tour"), 2],
