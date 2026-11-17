@@ -117,12 +117,8 @@ block wins:
   statement that only searches for a name (grep, rg, Select-String, git
   log/show/diff/commit) or a heredoc body is not a use of it. Cwd under
   `c:/git/tools/pulse` may use Jira and Pulse data directly.
-- **ev guard** ([`csharp/EvGuard.cs`](csharp/EvGuard.cs)), from EvolxCli — an
-  `ev ... --live` clause is checked against `~/.evolx/ev-policy.json`
-  (`EV_POLICY_FILE` overrides); fail-closed. Its verb tables
-  (`WriteVerbsDv` / `WriteVerbsAdo`) map a verb to the policy section. Only an
-  ADO-scoped `--live` clause starts a process (`git remote get-url origin` in
-  the hook's cwd).
+- ev's own writes are not judged here: ev enforces each profile's agent grant
+  itself, which also covers ev started from scripts.
 
 The git layer is handed **exact, unobfuscated arguments by git itself** — no
 string guessing.
@@ -168,7 +164,6 @@ Install.ps1          idempotent installer
 csharp/              the guard, one exe for both layers
   Program.cs           Claude PreToolUse hook (holds the whitelist)
   ClaudeGuard.cs       claude-guard rules
-  EvGuard.cs           ev --live policy guard (verb tables)
   GitHook.cs           content judge: git-guard.exe <hook> ...
 src/git-guard.sh     shim: repos armed before v3 exec it; it execs the exe
 templates/hooks/     one-line stubs copied into each repo's .git/hooks

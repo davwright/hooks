@@ -22,8 +22,8 @@
 //
 // The same exe also runs the other PreToolUse guards, so one native process
 // judges every tool call (node costs 0.4-1.2 s per start here, this ~40 ms):
-// the git checks below, then claude-guard (ClaudeGuard.cs), then the ev
-// customer-write guard (EvGuard.cs). The first block wins.
+// the git checks below, then claude-guard (ClaudeGuard.cs). The first block wins.
+// ev's own writes are not judged here: ev enforces each profile's agent grant itself.
 
 using System.Text;
 using System.Text.Json;
@@ -79,7 +79,6 @@ internal static partial class Program
 
         int rc = GitGuard(input, hook);
         if (rc == 0) rc = ClaudeGuard(hook);
-        if (rc == 0) rc = EvGuard(hook);
         return rc;
     }
 

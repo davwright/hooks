@@ -15,7 +15,7 @@
                                 + registers it in ~\.claude\settings.json under
                                 PreToolUse for the shell, file and read tools plus the
                                 Atlassian and plugin-Playwright MCP tools (one exe runs
-                                the git, claude-guard and ev guards), in exec form (args present = no shell), REPLACING
+                                the git and claude-guard checks), in exec form (args present = no shell), REPLACING
                                 any older git-guard entry.
 
     No shell versions: a hook run through bash costs seconds per call on this

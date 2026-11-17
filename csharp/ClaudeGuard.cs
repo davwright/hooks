@@ -93,7 +93,7 @@ internal static partial class Program
         new(s => ClaudeMarkerRe().IsMatch(s), ClaudeMarkerMsg, SkipSearches: true),
     ];
 
-    const string EvProfileMsg = "ev's profile and policy files (~/.evolx/profiles/*.json, ~/.evolx/ev-policy.json) carry what Claude may " +
+    const string EvProfileMsg = "ev's profile files (~/.evolx/profiles/*.json) carry what Claude may " +
         "change, so Claude may not write them. Use ev's verbs (ev profile set / bind / edit); permissions are the user's: " +
         "ev profile agent <NAME> --<service> read|write, run by the user.";
 
@@ -170,14 +170,14 @@ internal static partial class Program
     static bool IsEvProfileFile(string path)
     {
         string n = Norm(path);
-        return n.StartsWith($"{UserHome}/.evolx/profiles/", StringComparison.Ordinal) || n == $"{UserHome}/.evolx/ev-policy.json";
+        return n.StartsWith($"{UserHome}/.evolx/profiles/", StringComparison.Ordinal);
     }
 
     // Statements that only mention commands: searches, and commit messages that describe a change.
     static string WithoutSearches(string command) =>
         string.Join("\n", StatementSplitRe().Split(HeredocBodyRe().Replace(command, "\n")).Where(s => !SearchRe().IsMatch(s)));
 
-    [GeneratedRegex(@"\.evolx[\\/]+(profiles\b|ev-policy\.json)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\.evolx[\\/]+profiles\b",RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex EvProfileFileRe();
 
     // A redirect (not 2> or >&), a writing cmdlet or tool, or an in-place edit.
